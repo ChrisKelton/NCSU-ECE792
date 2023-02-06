@@ -1,9 +1,11 @@
-from PIL import Image
 from pathlib import Path
 from typing import List
+
 import numpy as np
-from Project.utils.files import get_real_path
+from PIL import Image
 from tqdm import tqdm
+
+from mlp_mnist.files import get_real_path
 
 
 def load_dataset_into_npy_file(img_dir_path: Path, suffix: List[str] = None, cnt_to_save: int = 100):

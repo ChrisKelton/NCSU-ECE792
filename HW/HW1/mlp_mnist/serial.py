@@ -2,7 +2,7 @@ __all__ = ["JsonSerial"]
 import jsonpickle
 from typing import Union
 from pathlib import Path
-from files import get_real_path
+from mlp_mnist.files import get_real_path
 
 
 class JsonSerial:
