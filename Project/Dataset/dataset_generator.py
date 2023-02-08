@@ -12,7 +12,14 @@ image_fun: Callable = lambda x: np.array(PILOpen(x))
 
 class DatasetGenerator:
 
-    def __init__(self, base_dir_path: Path, batch_size: int, shuffle: bool = True, n_parallel_jobs: int = 4, seed: Optional[int] = None):
+    def __init__(
+        self,
+        base_dir_path: Path,
+        batch_size: int,
+        shuffle: bool = True,
+        n_parallel_jobs: int = 4,
+        seed: Optional[int] = None,
+    ):
         self.image_paths = sorted(base_dir_path.glob("*.jpg"))
         if shuffle:
             if seed is not None:

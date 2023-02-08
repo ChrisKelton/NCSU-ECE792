@@ -354,9 +354,6 @@ class MnistMLP(BaseMnist):
         else:
             model = self.mlp
         model.eval()
-        # initialize appropriate classes to keep track of Loss & accuracy
-        loss = Loss.init()
-        self_loss = nn.CrossEntropyLoss()
         accuracy = Accuracy.from_output_decisions(self.output_decisions)
         epoch_tqdm = tqdm(total=self.num_epochs, desc="Epoch", position=0)
         for epoch in range(self.num_epochs):
@@ -364,13 +361,9 @@ class MnistMLP(BaseMnist):
                 # test our hopefully trained model on our test data
                 inputs, targets = data
                 outputs = model(inputs)
-                loss_val = self_loss(outputs, targets)
-                loss_val.backward()
-                loss += loss_val.item()
                 accuracy.compare_batch(targets=targets, outputs=outputs)
             accuracy.update_for_epoch()
             if self.verbose:
-                epoch_tqdm.write(f"Loss = {loss.current_loss}")
                 epoch_tqdm.write(f"Accuracy = {accuracy.acc_vals_per_epoch[epoch]}")
             epoch_tqdm.update(1)
 
@@ -386,13 +379,10 @@ class MnistMLP(BaseMnist):
             loss_plot_path,
         ) = self.get_output_paths_(output_path, epoch)
 
-        self.test_loss = loss
         self.test_accuracy = accuracy
-        self.test_loss.save_json(test_loss_json_path)
         self.test_accuracy.save_json(test_accuracy_json_path)
         self.test_accuracy.save_confusion_matrix(confusion_matrix_path, "0123456789")
         save_accuracy_plot(self.test_accuracy.acc_vals_per_epoch, accuracy_plot_path, plot_labels="test")
-        save_loss_plot(self.test_loss.loss_vals_per_epoch, loss_plot_path, plot_labels="test")
 
 
 def test_and_or_train_on_mnist_dataset(

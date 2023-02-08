@@ -1,7 +1,7 @@
 __all__ = ["Loss", "Accuracy", "save_accuracy_plot", "save_loss_plot"]
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Union, Optional
+from typing import List, Union, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -92,20 +92,24 @@ class Accuracy(JsonSerial):
         # method to read in 'Accuracy' class from saved json file (help with picking up from some spot of training)
         return super().read_json(json_file)
 
-    def compare_batch(self, targets: torch.Tensor, outputs: torch.Tensor):
+    def compare_batch(self, targets: torch.Tensor, outputs: torch.Tensor) -> List[Tuple[int, int]]:
         # determine accuracy between a batch of targets and outputs to update accuracy
         hit: int = 0
-        for target, output in zip(targets, outputs):
+        indices = []
+        for batch_idx, (target, output) in enumerate(zip(targets, outputs)):
             max_idx = int(torch.argmax(output))
             if bool(
                 target[max_idx]
             ):  # see if the one hot encoding scheme of our output neuron layer determined the highest probability to be the same as the true target label
                 hit += 1
                 self.correct_hits[max_idx] += 1
+                indices.append((batch_idx, max_idx))
             else:
                 self.incorrect_hits[int(torch.argmax(target)), max_idx] += 1
         self.acc_vals_per_batch.append(hit / len(targets))
         self.batch_cnt += 1
+
+        return indices
 
     def update_for_epoch(self):
         # update accuracy for epoch
