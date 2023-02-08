@@ -414,9 +414,9 @@ class CnnMnist(BaseMnist):
             labels_to_reconstruct = [int(x) for x in labels_to_reconstruct]
 
         accuracy = Accuracy.from_output_decisions(self.output_decisions)
-        epoch_tqdm = tqdm(total=self.n_epochs, desc="Epoch", position=0)
         if n_epoch is None:
             n_epoch = self.n_epochs
+        epoch_tqdm = tqdm(total=n_epoch, desc="Epoch", position=0)
 
         for epoch in range(n_epoch):
             for batch_idx, data in enumerate(test_loader):
@@ -535,7 +535,7 @@ def main():
     batch_size_test = 1000
     learning_rate = 1e-4
     train: bool = False
-    test: bool = True
+    test: bool = False
     reconstruct: bool = True
     reconstruction_output_path = Path("./model-0/reconstruction")
     labels_to_reconstruct = ["0", "1", "5", "8"]
