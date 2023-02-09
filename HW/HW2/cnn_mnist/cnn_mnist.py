@@ -66,8 +66,8 @@ def deconvnet(
         for batch_idx, (deconv_batch, label) in enumerate(zip(deconv, labels)):
             label_fig_path = figures_output_path / f"label-{label}--batch-idx-{batch_idx}"
             label_fig_path.mkdir(exist_ok=True, parents=True)
-            for in_channel, deconv_batch_channel in enumerate(deconv_batch):
-                kernel_fig_name = f"kernel-{idx}--to--in-channel-{in_channel}.png"
+            for channel, deconv_batch_channel in enumerate(deconv_batch):
+                kernel_fig_name = f"kernel-{idx}--to--channel-{channel}.png"
                 if not only_upsample:
                     kernel_fig_path_default_size = label_fig_path / "default_size"
                     kernel_fig_path_default_size.mkdir(exist_ok=True)
@@ -194,6 +194,8 @@ class BaseCnnMnist(nn.Module):
         labels_per_batch_idx: List[int],
         batch_idx: Optional[List[int]] = None,
         one_unique_label: bool = True,
+        upsample: bool = True,
+        upsample_size: Tuple[int, int] = (256, 256)
     ):
         if Path(output_path).suffix in [""]:
             Path(output_path).mkdir(exist_ok=True, parents=True)
@@ -228,8 +230,8 @@ class BaseCnnMnist(nn.Module):
             weights=self.conv1.weight,
             figures_output_path=layer_fig_path,
             labels=labels_per_batch_idx,
-            upsample=True,
-            upsample_size=(256, 256),
+            upsample=upsample,
+            upsample_size=upsample_size,
         )
 
         maxunpool2 = self.reconstruction_layers.maxunpool(maxpool2, maxpool_idx2)
@@ -241,18 +243,20 @@ class BaseCnnMnist(nn.Module):
             weights=self.conv2.weight,
             figures_output_path=layer_fig_path,
             labels=labels_per_batch_idx,
-            upsample=True,
-            upsample_size=(256, 256),
+            upsample=upsample,
+            upsample_size=upsample_size,
         )
 
 
 class CnnMnist(BaseMnist):
+    early_stopping_th: float = 1e-4
+    validation_th_to_decrease_learning_rate: float = 0.01
 
     def __init__(
         self,
         n_epochs: int = 10,
         epoch_to_save_model: int = 10,
-        learning_rate: float = 1e-4,
+        learning_rate: float = 0.01,
         verbose: bool = False,
     ):
         super(CnnMnist, self).__init__()
@@ -260,6 +264,7 @@ class CnnMnist(BaseMnist):
         self.epoch_to_save_model = epoch_to_save_model
         self.verbose = verbose
         self.cnn_mnist = BaseCnnMnist()
+        self.learning_rate = learning_rate
 
         self.loss_function = nn.CrossEntropyLoss()  # employs softmax
         self.optimizer = torch.optim.Adam(self.cnn_mnist.parameters(), lr=learning_rate)
@@ -270,13 +275,16 @@ class CnnMnist(BaseMnist):
         train_loader: torch.utils.data.DataLoader,
         output_path: Union[str, Path],
         test_loader: Optional[torch.utils.data.DataLoader] = None,
+        validation_loader: Optional[torch.utils.data.DataLoader] = None,
     ):
         if Path(output_path).suffix not in [""]:
             Path(output_path).mkdir(exist_ok=True, parents=True)
 
         train_loss = Loss.init()
+        val_loss = Loss.init()
         test_loss = Loss.init()
         train_accuracy = Accuracy.from_output_decisions(self.output_decisions)
+        val_accuracy = Accuracy.from_output_decisions(self.output_decisions)
         test_accuracy = Accuracy.from_output_decisions(self.output_decisions)
 
         epoch_tqdm = tqdm(total=self.n_epochs, desc="Epoch", position=0)
@@ -297,7 +305,7 @@ class CnnMnist(BaseMnist):
                 test_loss.update_for_epoch()
                 self.cnn_mnist.train()
 
-            for batch_idx, train_data in enumerate(train_loader):
+            for train_batch_idx, train_data in enumerate(train_loader):
                 train_inputs, train_targets = train_data
                 self.optimizer.zero_grad()
                 train_outputs = self.cnn_mnist.forward(torch.unsqueeze(train_inputs, dim=1))
@@ -310,13 +318,46 @@ class CnnMnist(BaseMnist):
             train_accuracy.update_for_epoch()
             train_loss.update_for_epoch()
 
+            if validation_loader is not None:
+                self.cnn_mnist.eval()
+
+                for val_batch_idx, val_data in enumerate(validation_loader):
+                    val_inputs, val_targets = val_data
+                    val_outputs = self.cnn_mnist.forward(torch.unsqueeze(val_inputs, dim=1))
+                    loss_val = self.loss_function(val_outputs, val_targets)
+                    val_loss += loss_val.item()
+                    output_class_probabilities = self.cnn_mnist.class_probabilities(val_outputs)
+                    val_accuracy.compare_batch(targets=val_targets, outputs=output_class_probabilities)
+                val_accuracy.update_for_epoch()
+                val_loss.update_for_epoch()
+                self.cnn_mnist.train()
+                if len(val_accuracy.acc_vals_per_epoch) > 3:
+                    if (
+                            (val_loss.loss_vals_per_epoch[epoch] > val_loss.loss_vals_per_epoch[epoch - 1]) and
+                            (val_loss.loss_vals_per_epoch[epoch] > val_loss.loss_vals_per_epoch[epoch - 2]) and
+                            (val_loss.loss_vals_per_epoch[epoch] > val_loss.loss_vals_per_epoch[epoch - 3])) or \
+                            (abs(val_loss.loss_vals_per_epoch[epoch] - val_loss.loss_vals_per_epoch[epoch - 1]) < self.validation_th_to_decrease_learning_rate):
+                        self.learning_rate /= 10
+                        epoch_tqdm.write(f"Learning rate update to '{self.learning_rate}'")
+                        for g in self.optimizer.param_groups:
+                            g["lr"] = self.learning_rate
+
             if self.verbose:
                 epoch_tqdm.write(f"Train Loss = {train_loss.current_loss}")
+                if validation_loader is not None:
+                    epoch_tqdm.write(f"Validation Loss = {val_loss.current_loss}")
                 if test_loader is not None:
                     epoch_tqdm.write(f"Test Loss = {test_loss.current_loss}")
                 epoch_tqdm.write(f"Train Accuracy = {train_accuracy.acc_vals_per_epoch[epoch]}")
+                if validation_loader is not None:
+                    epoch_tqdm.write(f"Validation Accuracy = {val_accuracy.acc_vals_per_epoch[epoch]}")
                 if test_loader is not None:
                     epoch_tqdm.write(f"Test Accuracy = {test_accuracy.acc_vals_per_epoch[epoch]}")
+            if len(train_loss.loss_vals_per_epoch) > 2:
+                if (abs(train_loss.loss_vals_per_epoch[epoch] - train_loss.loss_vals_per_epoch[epoch - 1]) < self.early_stopping_th) and (abs(train_loss.loss_vals_per_epoch[epoch] - train_loss.loss_vals_per_epoch[epoch - 2]) < self.early_stopping_th):
+                    epoch_tqdm.write(f"Training Loss has reached a minimum at '{train_loss.loss_vals_per_epoch[epoch]}'"
+                                     f". Ending Testing.")
+                    break
             epoch_tqdm.update(1)
 
             if self.epoch_to_save_model is not None and (epoch % self.epoch_to_save_model == 0 and epoch > 0):
@@ -342,8 +383,14 @@ class CnnMnist(BaseMnist):
                 else:
                     test_acc_per_epoch = None
                     test_loss_per_epoch = None
-                save_accuracy_plot(train_accuracy.acc_vals_per_epoch, accuracy_plot_path, test_acc_per_epoch)
-                save_loss_plot(train_loss.loss_vals_per_epoch, loss_plot_path, test_loss_per_epoch)
+                if validation_loader is not None:
+                    val_acc_per_epoch = val_accuracy.acc_vals_per_epoch
+                    val_loss_per_epoch = val_loss.loss_vals_per_epoch
+                else:
+                    val_acc_per_epoch = None
+                    val_loss_per_epoch = None
+                save_accuracy_plot(train_accuracy.acc_vals_per_epoch, accuracy_plot_path, test_acc_per_epoch, val_acc_per_epoch)
+                save_loss_plot(train_loss.loss_vals_per_epoch, loss_plot_path, test_loss_per_epoch, val_loss_per_epoch)
 
         print("Training has finished.")
         (
@@ -369,10 +416,16 @@ class CnnMnist(BaseMnist):
             self.test_accuracy = test_accuracy
             self.test_loss.save_json(test_loss_json_path)
             self.test_accuracy.save_json(test_accuracy_json_path)
+        if validation_loader is None:
+            val_loss = None
+            val_accuracy = None
+        else:
+            val_loss = val_loss.loss_vals_per_epoch
+            val_accuracy = val_accuracy.acc_vals_per_epoch
         save_accuracy_plot(
-            self.train_accuracy.acc_vals_per_epoch, accuracy_plot_path, self.test_accuracy.acc_vals_per_epoch
+            self.train_accuracy.acc_vals_per_epoch, accuracy_plot_path, self.test_accuracy.acc_vals_per_epoch, val_accuracy
         )
-        save_loss_plot(self.train_loss.loss_vals_per_epoch, loss_plot_path, self.test_loss.loss_vals_per_epoch)
+        save_loss_plot(self.train_loss.loss_vals_per_epoch, loss_plot_path, self.test_loss.loss_vals_per_epoch, val_loss)
 
     def reconstruct(
         self,
@@ -381,30 +434,46 @@ class CnnMnist(BaseMnist):
         reconstruction_output_path: Union[str, Path],
         labels_to_reconstruct: List[Union[int, str]],
         model_path: Optional[Union[str, Path]] = None,
+        one_unique_label: bool = True,
+        upsample: bool = True,
+        upsample_size: Tuple[int, int] = (256, 256),
     ):
         dataloader = self.preprocess_data(images, labels, batch_size=len(images))
         self.test(
-            dataloader,
-            model_path,
-            True,
-            reconstruction_output_path,
-            labels_to_reconstruct,
+            test_loader=dataloader,
+            model_path=model_path,
+            reconstruct=True,
+            reconstruction_output_path=reconstruction_output_path,
+            labels_to_reconstruct=labels_to_reconstruct,
             n_epoch=1,
+            one_unique_label=one_unique_label,
+            upsample_reconstruction_activations=upsample,
+            upsample_reconstruction_size=upsample_size,
         )
 
     def test(
         self,
         test_loader: torch.utils.data.DataLoader,
         model_path: Optional[Union[str, Path]] = None,
+        output_path: Optional[Path] = None,
         reconstruct: bool = False,
         reconstruction_output_path: Optional[Union[str, Path]] = None,
         labels_to_reconstruct: Optional[List[Union[int, str]]] = None,
         n_epoch: Optional[int] = None,
+        one_unique_label: bool = True,
+        upsample_reconstruction_activations: bool = False,
+        upsample_reconstruction_size: Tuple[int, int] = (256, 256),
     ):
         if model_path is not None:
             model = BaseCnnMnist()
             model.load_state_dict(torch.load(model_path))
         else:
+            if reconstruction_output_path is None and output_path is None:
+                raise RuntimeError(f"Expected either model_path, reconstruction_output_path or output_path to be passed through.")
+            elif reconstruction_output_path is not None:
+                model_path = reconstruction_output_path
+            else:
+                model_path = output_path
             model = self.cnn_mnist
         model.eval()
         if reconstruct:
@@ -435,7 +504,9 @@ class CnnMnist(BaseMnist):
                         reconstruction_output_path,
                         labels_per_batch_idx=accurate_labels,
                         batch_idx=accurate_batch_idx,
-                        one_unique_label=True,
+                        one_unique_label=one_unique_label,
+                        upsample=upsample_reconstruction_activations,
+                        upsample_size=upsample_reconstruction_size,
                     )
             accuracy.update_for_epoch()
             if self.verbose:
@@ -467,13 +538,19 @@ def cnn_mnist_run(
     epochs_to_save_model: int = 5,
     batch_size_train: int = 64,
     batch_size_test: int = 1000,
-    learning_rate: float = 1e-4,
+    learning_rate: float = 0.01,
+    validation_split: float = 0.1,
+    shuffle_dataset: bool = False,
+    random_seed: Optional[int] = None,
     train: bool = False,
     test: bool = True,
     model_path_to_test: Optional[Path] = None,
     reconstruct: bool = False,
     reconstruction_output_path: Optional[Path] = None,
     labels_to_reconstruct: Optional[List[Union[str, int]]] = None,
+    one_unique_label_for_reconstruction: bool = True,
+    upsample_reconstruction_activations: bool = True,
+    upsample_reconstruction_size: Tuple[int, int] = (256, 256),
     test_using_training_set: bool = False,
     reconstruct_using_training_set: bool = False,
     verbose: bool = False,
@@ -497,8 +574,20 @@ def cnn_mnist_run(
         else:
             test_loader = None
         train_images, train_labels = mndata.load_training()
-        train_loader = cnn_mnist.preprocess_data(train_images, train_labels, batch_size_train)
-        cnn_mnist.train(train_loader, get_real_path(model_output_base_path), test_loader)
+        indices = np.arange(0, len(train_images))
+        split = int(np.floor(validation_split * len(train_images)))
+        if shuffle_dataset:
+            if random_seed is not None:
+                np.random.seed(random_seed)
+            np.random.shuffle(indices)
+        train_indices, validation_indices = indices[split:], indices[:split]
+        validation_images = [train_images[val_idx] for val_idx in validation_indices]
+        validation_labels = [train_labels[val_idx] for val_idx in validation_indices]
+        validation_loader = cnn_mnist.preprocess_data(validation_images, validation_labels, batch_size_train, shuffle_dataset)
+        train_images = [train_images[train_idx] for train_idx in train_indices]
+        train_labels = [train_labels[train_idx] for train_idx in train_indices]
+        train_loader = cnn_mnist.preprocess_data(train_images, train_labels, batch_size_train, shuffle_dataset)
+        cnn_mnist.train(train_loader, get_real_path(model_output_base_path), test_loader, validation_loader)
 
     if test and model_path_to_test is not None:
         if test_using_training_set:
@@ -522,23 +611,30 @@ def cnn_mnist_run(
             reconstruction_output_path=reconstruction_output_path,
             labels_to_reconstruct=labels_to_reconstruct,
             model_path=model_path_to_test,
+            one_unique_label=one_unique_label_for_reconstruction,
+            upsample=upsample_reconstruction_activations,
+            upsample_size=upsample_reconstruction_size,
         )
 
 
 def main():
     mnist_data_sets_base_path = Path("../../HW1/DATA/MNIST")
-    model_output_base_path = Path("./model-0")
-    model_path_to_test = Path("./model-0/models/model-2023-02-06--15-29-57--99.pt")
+    model_output_base_path = Path("./model-1")
+    # model_path_to_test = Path("./model-0/models/model-2023-02-06--15-29-57--99.pt")
+    model_path_to_test = None
     n_epochs = 100
     epochs_to_save_model = 5
     batch_size_train = 64
     batch_size_test = 1000
     learning_rate = 1e-4
-    train: bool = False
-    test: bool = False
+    train: bool = True
+    test: bool = True
     reconstruct: bool = True
-    reconstruction_output_path = Path("./model-0/reconstruction")
-    labels_to_reconstruct = ["0", "1", "5", "8"]
+    reconstruction_output_path: Path = model_output_base_path / "reconstruction"
+    labels_to_reconstruct: List[str] = ["0", "1", "5", "8"]
+    one_unique_label_for_reconstruction: bool = True
+    upsample_reconstruction_activations: bool = True
+    upsample_reconstruction_size: Tuple[int, int] = (256, 256)
     test_using_training_set: bool = True
     verbose: bool = True
     cnn_mnist_run(
@@ -555,6 +651,9 @@ def main():
         reconstruct=reconstruct,
         reconstruction_output_path=reconstruction_output_path,
         labels_to_reconstruct=labels_to_reconstruct,
+        one_unique_label_for_reconstruction=one_unique_label_for_reconstruction,
+        upsample_reconstruction_activations=upsample_reconstruction_activations,
+        upsample_reconstruction_size=upsample_reconstruction_size,
         test_using_training_set=test_using_training_set,
         verbose=verbose,
     )

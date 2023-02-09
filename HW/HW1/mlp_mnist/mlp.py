@@ -124,7 +124,7 @@ class BaseMnist:
             loss_plot_path,
         )
 
-    def preprocess_data(self, images, labels, batch_size: int) -> torch.utils.data.DataLoader:
+    def preprocess_data(self, images, labels, batch_size: int, shuffle: bool = True) -> torch.utils.data.DataLoader:
         # perform one hot encoding.
         # E.g., if class labels are '0', '1', '2', '3', then each label will map to the following
         # '0' -> [1, 0, 0, 0]
@@ -155,7 +155,7 @@ class BaseMnist:
         images_preprocessed = torch.squeeze(preprocessing_transform(test_images_tensors))
         # load images and labels into dataloader for compatability with pytorch
         data_loader = torch.utils.data.DataLoader(
-            [[img, label] for img, label in zip(images_preprocessed, labels)], shuffle=True, batch_size=batch_size
+            [[img, label] for img, label in zip(images_preprocessed, labels)], shuffle=shuffle, batch_size=batch_size
         )
         return data_loader
 

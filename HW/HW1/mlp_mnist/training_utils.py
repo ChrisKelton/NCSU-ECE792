@@ -138,6 +138,7 @@ class Accuracy(JsonSerial):
 def plot_accuracy_or_loss(
     train_vals: List[float],
     output_path: Union[str, Path],
+    validation_vals: Optional[List[float]] = None,
     test_vals: Optional[List[float]] = None,
     title: Optional[str] = None,
     ylabel: Optional[str] = None,
@@ -145,15 +146,22 @@ def plot_accuracy_or_loss(
     plot_labels: Optional[Union[str, List[str]]] = None,
 ):
     if plot_labels is None:
-        plot_labels = ["train", "test"]
+        plot_labels = ["train"]
+        if validation_vals is not None:
+            plot_labels.append("validation")
+        if test_vals is not None:
+            plot_labels.append("test")
     elif not isinstance(plot_labels, list):
-        plot_labels = [plot_labels] * 2
+        plot_labels = [plot_labels] * 3
 
     x_epochs = np.arange(1, len(train_vals) + 1)
     plt.plot(x_epochs, train_vals, label=plot_labels[0])
+    if validation_vals is not None:
+        x_epochs = np.arange(len(train_vals) - len(validation_vals) + 1, len(train_vals) + 1)
+        plt.plot(x_epochs, validation_vals, label=plot_labels[1])
     if test_vals is not None:
         x_epochs = np.arange(len(train_vals) - len(test_vals) + 1, len(train_vals) + 1)
-        plt.plot(x_epochs, test_vals, label=plot_labels[1])
+        plt.plot(x_epochs, test_vals, label=plot_labels[2])
     if title is not None:
         plt.title(title)
     if ylabel is not None:
@@ -169,12 +177,14 @@ def save_accuracy_plot(
     train_acc: List[float],
     output_path: Union[str, Path],
     test_acc: Optional[List[float]] = None,
+    val_acc: Optional[List[float]] = None,
     plot_labels: Optional[Union[str, List[str]]] = None,
 ):
     plot_accuracy_or_loss(
         train_vals=train_acc,
-        test_vals=test_acc,
         output_path=output_path,
+        validation_vals=val_acc,
+        test_vals=test_acc,
         title="Accuracy",
         ylabel="Accuracy",
         xlabel="Epochs",
@@ -186,12 +196,14 @@ def save_loss_plot(
     train_loss: List[float],
     output_path: Union[str, Path],
     test_loss: Optional[List[float]] = None,
+    val_loss: Optional[List[float]] = None,
     plot_labels: Optional[Union[str, List[str]]] = None,
 ):
     plot_accuracy_or_loss(
         train_vals=train_loss,
-        test_vals=test_loss,
         output_path=output_path,
+        validation_vals=val_loss,
+        test_vals=test_loss,
         title="Loss",
         ylabel="Loss",
         xlabel="Epochs",
