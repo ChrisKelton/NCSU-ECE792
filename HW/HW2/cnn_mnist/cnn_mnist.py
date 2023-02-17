@@ -1,3 +1,4 @@
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union, List, Tuple
@@ -13,37 +14,91 @@ from mlp_mnist.files import load_mnist_dataset, get_real_path
 from mlp_mnist.mlp import BaseMnist
 from mlp_mnist.training_utils import Loss, Accuracy, save_accuracy_plot, save_loss_plot
 
+TupleType = Union[Tuple[Union[int, float], Union[int, float]], List[Union[int, float]], torch.Size]
 
-@dataclass
-class CnnMnistReconstructionLayers:
-    maxunpool: torch.nn.Module
-    deconv2: torch.nn.Module
-    deconv1: torch.nn.Module
 
-    @classmethod
-    def init(cls) -> "CnnMnistReconstructionLayers":
-        maxunpool = nn.MaxUnpool2d(kernel_size=(2, 2), stride=(2, 2))
-        deconv2 = nn.ConvTranspose2d(16, 16, kernel_size=(5, 5), stride=(1, 1))
-        deconv2.bias = None
-        deconv1 = nn.ConvTranspose2d(6, 6, kernel_size=(5, 5), stride=(1, 1), padding=(2, 2))
-        deconv1.bias = None
+def check_tuples_for_shape_determination(
+    padding_size: Union[int, TupleType],
+    filter_size: Union[int, TupleType],
+    stride_size: Union[int, TupleType],
+) -> Tuple[TupleType, TupleType, TupleType]:
+    if isinstance(padding_size, int):
+        padding_size = [padding_size] * 2
+    if len(padding_size) != 2:
+        raise ValueError(f"padding_size length is not '2'. Got '{len(padding_size)}'")
+    if isinstance(filter_size, int):
+        filter_size = [filter_size] * 2
+    if len(filter_size) != 2:
+        raise ValueError(f"filter_size length is not '2'. Got '{len(filter_size)}'")
+    if isinstance(stride_size, int):
+        if stride_size == 0:
+            stride_size = 1
+        stride_size = [stride_size] * 2
+    elif 0 in stride_size:
+        stride_size = [1] * 2
+    if len(stride_size) != 2:
+        raise ValueError(f"stride_size length is not '2'. Got '{len(stride_size)}'")
 
-        return cls(
-            maxunpool=maxunpool,
-            deconv2=deconv2,
-            deconv1=deconv1,
-        )
+    return padding_size, filter_size, stride_size
+
+
+def conv2d_out_shape_(
+    input_size: int,
+    padding_size: int,
+    filter_size: int,
+    stride_size: int,
+) -> int:
+    return int(np.round(((input_size + (2 * padding_size) - filter_size) / stride_size) + 0.4999) + 1)
+
+
+def conv2d_out_shape(
+    input_shape: Tuple[int, int],
+    padding_size: Union[int, TupleType],
+    filter_size: Union[int, TupleType],
+    stride_size: Union[int, TupleType],
+) -> Tuple[int, int]:
+    padding_size, filter_size, stride_size = check_tuples_for_shape_determination(padding_size, filter_size, stride_size)
+    width = conv2d_out_shape_(input_shape[0], padding_size[0], filter_size[0], stride_size[0])
+    height = conv2d_out_shape_(input_shape[1], padding_size[1], filter_size[1], stride_size[1])
+
+    return width, height
+
+
+def deconv2d_out_shape_(
+    input_size: int,
+    padding_size: int,
+    filter_size: int,
+    stride_size: int,
+) -> int:
+    return int((stride_size * (input_size - 1)) + filter_size - (2 * padding_size))
+
+
+def deconv2d_out_shape(
+    input_shape: Tuple[int, int],
+    padding_size: Union[int, TupleType],
+    filter_size: Union[int, TupleType],
+    stride_size: Union[int, TupleType],
+) -> Tuple[int, int]:
+    padding_size, filter_size, stride_size = check_tuples_for_shape_determination(padding_size, filter_size, stride_size)
+    width = deconv2d_out_shape_(input_shape[0], padding_size[0], filter_size[0], stride_size[0])
+    height = deconv2d_out_shape_(input_shape[1], padding_size[1], filter_size[1], stride_size[1])
+
+    return width, height
 
 
 def deconvnet(
     activation_output: torch.Tensor,
-    weights: torch.Tensor,
+    weights: Union[List[torch.Tensor], torch.Tensor],
     figures_output_path: Path,
     labels: List[Union[str, int]],
+    maxunpool=None,
+    maxpool_idx=None,
+    activation_layer=None,
     upsample: bool = False,
     upsample_size: Optional[Tuple[int, int]] = None,
     only_upsample: bool = False,
-):
+    save_outputs: bool = True,
+) -> torch.Tensor:
     if activation_output.ndim == 3:
         activation_output = activation_output.unsqueeze(0)
     elif activation_output.ndim != 4:
@@ -56,37 +111,79 @@ def deconvnet(
     if upsample and upsample_size is None:
         raise RuntimeError(f"When upsampling, you must specify a desired size to upsample to.")
 
-    for idx, weight in enumerate(weights):
-        deconv = F.conv_transpose2d(activation_output[:, idx, :, :].unsqueeze(1), weight=weight.unsqueeze(0))
+    if not isinstance(weights, list):
+        weights = [weights]
 
-        if upsample and only_upsample:  # want double protection for this case
-            # want to use nearest neighbors in order to preserve high activation points
-            deconv = F.interpolate(deconv, size=upsample_size, mode="nearest")
+    # determine output shape from deconvolutions
+    out_shape = activation_output.shape[-2:]
+    if maxunpool is not None:
+        if not isinstance(maxunpool, list):
+            maxunpool = [maxunpool]
+        if not isinstance(maxpool_idx, list):
+            maxpool_idx = [maxpool_idx]
+    if maxunpool is not None:
+        for idx, weight in enumerate(weights[:-1]):
+            out_shape = deconv2d_out_shape(out_shape, 0, weight.shape[-2:], 1)[0] * maxunpool[idx].stride[0]
+            out_shape = [out_shape] * 2
 
-        for batch_idx, (deconv_batch, label) in enumerate(zip(deconv, labels)):
-            label_fig_path = figures_output_path / f"label-{label}--batch-idx-{batch_idx}"
-            label_fig_path.mkdir(exist_ok=True, parents=True)
-            for channel, deconv_batch_channel in enumerate(deconv_batch):
-                kernel_fig_name = f"kernel-{idx}--to--channel-{channel}.png"
+    deconv_out = torch.empty((activation_output.shape[0], activation_output.shape[1], out_shape[0], out_shape[1]), dtype=activation_output.dtype)
+    for idx, act_out in enumerate(torch.swapaxes(activation_output, 0, 1)):
+        act_out_zeros = torch.zeros(activation_output.shape, dtype=activation_output.dtype)
+        act_out_zeros[:, idx, :, :] = act_out
+        for weight_idx, weight in enumerate(weights):
+            if weight_idx == len(weights) - 1 or maxunpool is None:
+                padding = "same"
+            elif maxunpool is not None:
+                padding = maxunpool[weight_idx].stride[0] * 2
+            else:
+                padding = "same"
+            deconv_ = F.conv2d(act_out_zeros, weight=torch.swapaxes(weight.transpose(dim0=2, dim1=3), 0, 1), padding=padding).squeeze()
+            if weight_idx != len(weights) - 1 and maxunpool is not None:
+                deconv_ = maxunpool[weight_idx](deconv_, maxpool_idx[weight_idx])
+                deconv_ = activation_layer(deconv_)
+            act_out_zeros = deconv_
+        deconv_out[:, idx, :, :] = deconv_
+
+        if save_outputs:
+            if upsample and only_upsample:  # want double protection for this case
+                # want to use nearest neighbors in order to preserve high activation points
+                deconv = F.interpolate(deconv_out[:, idx, :, :], size=upsample_size, mode="nearest")
+            else:
+                deconv = deconv_out[:, idx, :, :]
+            if deconv.ndim == 3:
+                deconv = deconv.unsqueeze(1)
+
+            for batch_idx, (deconv_batch, label) in enumerate(zip(deconv, labels)):
+                label_fig_path = figures_output_path / f"label-{label}--batch-idx-{batch_idx}"
+                label_fig_path.mkdir(exist_ok=True, parents=True)
+                # for channel, deconv_batch_channel in enumerate(deconv_batch):
+                kernel_fig_name = f"kernel-{idx}.png"  #--to--channel-{channel}.png"
+                deconv_batch = deconv_batch.squeeze()
                 if not only_upsample:
                     kernel_fig_path_default_size = label_fig_path / "default_size"
                     kernel_fig_path_default_size.mkdir(exist_ok=True)
                     plt.imsave(
                         get_real_path(kernel_fig_path_default_size / kernel_fig_name),
-                        deconv_batch_channel.detach().numpy(),
+                        deconv_batch.detach().numpy(),
+                        # deconv_batch_channel.detach().numpy(),
                     )
                 if upsample:
                     kernel_fig_path_upsampled = label_fig_path / "upsampled"
                     kernel_fig_path_upsampled.mkdir(exist_ok=True)
-                    deconv_batch_channel = F.interpolate(
-                        deconv_batch_channel.unsqueeze(0).unsqueeze(0),
+                    # deconv_batch_channel = F.interpolate(
+                    deconv_batch = F.interpolate(
+                        # deconv_batch_channel.unsqueeze(0).unsqueeze(0),
+                        deconv_batch.unsqueeze(0).unsqueeze(0),
                         size=upsample_size,
                         mode="nearest",
                     ).squeeze(0).squeeze(0)
                     plt.imsave(
                         get_real_path(kernel_fig_path_upsampled / kernel_fig_name),
-                        deconv_batch_channel.detach().numpy(),
+                        # deconv_batch_channel.detach().numpy(),
+                        deconv_batch.detach().numpy(),
                     )
+
+    return deconv_out
 
 
 class BaseCnnMnist(nn.Module):
@@ -147,7 +244,7 @@ class BaseCnnMnist(nn.Module):
 
         self.output6 = nn.Softmax(dim=1)
 
-        self.reconstruction_layers = CnnMnistReconstructionLayers.init()
+        self.reconstruction_maxunpool = nn.MaxUnpool2d(kernel_size=(2, 2), stride=(2, 2))
 
     def forward(self, x):
         conv1 = self.conv1(x)
@@ -203,6 +300,7 @@ class BaseCnnMnist(nn.Module):
             raise ValueError(f"output_path for reconstruction must be a directory. Got '{output_path}'")
 
         if one_unique_label:
+            # only get one label each from outputs to reconstruct rather than reconstructing many similar outputs
             unique_vals = np.unique(labels_per_batch_idx)
             unique_idx = []
             for val in unique_vals:
@@ -221,7 +319,7 @@ class BaseCnnMnist(nn.Module):
             maxpool1 = self.intermediate_outputs.maxpool1
             maxpool_idx1 = self.intermediate_outputs.maxpool_idx1
 
-        maxunpool1 = self.reconstruction_layers.maxunpool(maxpool1, maxpool_idx1)
+        maxunpool1 = self.reconstruction_maxunpool(maxpool1, maxpool_idx1)
         activation1 = self.activation1(maxunpool1)
         layer_fig_path = Path(output_path) / "layer-1"
         layer_fig_path.mkdir(exist_ok=True, parents=True)
@@ -234,14 +332,21 @@ class BaseCnnMnist(nn.Module):
             upsample_size=upsample_size,
         )
 
-        maxunpool2 = self.reconstruction_layers.maxunpool(maxpool2, maxpool_idx2)
+        maxunpool2 = self.reconstruction_maxunpool(maxpool2, maxpool_idx2)
         activation2 = self.activation2(maxunpool2)
         layer_fig_path = Path(output_path) / "layer-2"
         layer_fig_path.mkdir(exist_ok=True, parents=True)
-        deconvnet(
+        deconv2_weights = [
+            self.conv2.weight,
+            self.conv1.weight,
+        ]
+        deconv2 = deconvnet(
             activation_output=activation2,
-            weights=self.conv2.weight,
+            weights=deconv2_weights,
             figures_output_path=layer_fig_path,
+            maxunpool=self.reconstruction_maxunpool,
+            maxpool_idx=maxpool_idx1,
+            activation_layer=self.activation1,
             labels=labels_per_batch_idx,
             upsample=upsample,
             upsample_size=upsample_size,
@@ -338,6 +443,7 @@ class CnnMnist(BaseMnist):
                             (val_loss.loss_vals_per_epoch[epoch] > val_loss.loss_vals_per_epoch[epoch - 3])) or \
                             (abs(val_loss.loss_vals_per_epoch[epoch] - val_loss.loss_vals_per_epoch[epoch - 1]) < self.validation_th_to_decrease_learning_rate):
                         self.learning_rate /= 10
+                        self.validation_th_to_decrease_learning_rate /= 10
                         epoch_tqdm.write(f"Learning rate update to '{self.learning_rate}'")
                         for g in self.optimizer.param_groups:
                             g["lr"] = self.learning_rate
@@ -392,6 +498,8 @@ class CnnMnist(BaseMnist):
                 save_accuracy_plot(train_accuracy.acc_vals_per_epoch, accuracy_plot_path, test_acc_per_epoch, val_acc_per_epoch)
                 save_loss_plot(train_loss.loss_vals_per_epoch, loss_plot_path, test_loss_per_epoch, val_loss_per_epoch)
 
+        self.learning_rate = 0.01
+        self.validation_th_to_decrease_learning_rate = 0.01
         print("Training has finished.")
         (
             output_path,
@@ -438,6 +546,10 @@ class CnnMnist(BaseMnist):
         upsample: bool = True,
         upsample_size: Tuple[int, int] = (256, 256),
     ):
+        print("****STARTING RECONSTRUCTION****")
+        if reconstruction_output_path.exists():
+            shutil.rmtree(get_real_path(reconstruction_output_path))
+        Path(reconstruction_output_path).mkdir(exist_ok=True, parents=True)
         dataloader = self.preprocess_data(images, labels, batch_size=len(images))
         self.test(
             test_loader=dataloader,
@@ -449,6 +561,7 @@ class CnnMnist(BaseMnist):
             one_unique_label=one_unique_label,
             upsample_reconstruction_activations=upsample,
             upsample_reconstruction_size=upsample_size,
+            no_accuracy_plot=True,
         )
 
     def test(
@@ -463,6 +576,7 @@ class CnnMnist(BaseMnist):
         one_unique_label: bool = True,
         upsample_reconstruction_activations: bool = False,
         upsample_reconstruction_size: Tuple[int, int] = (256, 256),
+        no_accuracy_plot: bool = False,
     ):
         if model_path is not None:
             model = BaseCnnMnist()
@@ -523,12 +637,13 @@ class CnnMnist(BaseMnist):
             confusion_matrix_path,
             accuracy_plot_path,
             _,
-        ) = self.get_output_paths_(Path(model_path).parent / "testing", epoch)
+        ) = self.get_output_paths_(Path(model_path).parent / "testing", epoch, no_loss=True, no_models=True)
 
         self.test_accuracy = accuracy
         self.test_accuracy.save_json(test_accuracy_json_path)
         self.test_accuracy.save_confusion_matrix(confusion_matrix_path, "0123456789")
-        save_accuracy_plot(self.test_accuracy.acc_vals_per_epoch, accuracy_plot_path, plot_labels="test")
+        if not no_accuracy_plot:
+            save_accuracy_plot(self.test_accuracy.acc_vals_per_epoch, accuracy_plot_path, plot_labels="test")
 
 
 def cnn_mnist_run(
@@ -620,15 +735,15 @@ def cnn_mnist_run(
 def main():
     mnist_data_sets_base_path = Path("../../HW1/DATA/MNIST")
     model_output_base_path = Path("./model-1")
-    # model_path_to_test = Path("./model-0/models/model-2023-02-06--15-29-57--99.pt")
+    # model_path_to_test = Path("./model-1/models/model-2023-02-09--00-32-15--16.pt")
     model_path_to_test = None
     n_epochs = 100
     epochs_to_save_model = 5
     batch_size_train = 64
     batch_size_test = 1000
-    learning_rate = 1e-4
-    train: bool = True
-    test: bool = True
+    learning_rate = 0.01
+    train: bool = False
+    test: bool = False
     reconstruct: bool = True
     reconstruction_output_path: Path = model_output_base_path / "reconstruction"
     labels_to_reconstruct: List[str] = ["0", "1", "5", "8"]

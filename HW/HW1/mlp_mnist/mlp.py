@@ -70,7 +70,15 @@ class BaseMnist:
         self.enc.fit([[0], [1], [2], [3], [4], [5], [6], [7], [8], [9]])
 
     @classmethod
-    def get_output_paths_(cls, output_path: Path, epoch: int) -> Tuple[Union[str, Path], ...]:
+    def get_output_paths_(
+        cls,
+        output_path: Path,
+        epoch: int,
+        no_loss: bool = False,
+        no_accuracy: bool = False,
+        no_confusion: bool = False,
+        no_models: bool = False,
+    ) -> Tuple[Union[str, Path], ...]:
         # utility function to get output paths for all meaningful outputs when saving a model
         if Path(output_path).suffix in [""]:
             Path(output_path).mkdir(exist_ok=True, parents=True)
@@ -82,10 +90,14 @@ class BaseMnist:
 
         time_now = datetime.now()
         model_pt_name = time_now.strftime("%Y-%m-%d--%H-%M-%S")
-        (Path(temp_output_path) / "loss").mkdir(exist_ok=True, parents=True)
-        (Path(temp_output_path) / "accuracy").mkdir(exist_ok=True, parents=True)
-        (Path(temp_output_path) / "confusion").mkdir(exist_ok=True, parents=True)
-        (Path(temp_output_path) / "models").mkdir(exist_ok=True, parents=True)
+        if not no_loss:
+            (Path(temp_output_path) / "loss").mkdir(exist_ok=True, parents=True)
+        if not no_accuracy:
+            (Path(temp_output_path) / "accuracy").mkdir(exist_ok=True, parents=True)
+        if not no_confusion:
+            (Path(temp_output_path) / "confusion").mkdir(exist_ok=True, parents=True)
+        if not no_models:
+            (Path(temp_output_path) / "models").mkdir(exist_ok=True, parents=True)
         if os.name == "nt":
             temp_output_path = str(temp_output_path)
             train_loss_json_path = temp_output_path + f"\\loss\\loss-train-{model_pt_name}--{epoch}.json"
