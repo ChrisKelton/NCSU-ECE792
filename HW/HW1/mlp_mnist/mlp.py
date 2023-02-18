@@ -1,21 +1,18 @@
+__all__ = ["BaseMnist"]
 import os
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union, List, Tuple
+from typing import Optional, Union, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-import seaborn as sns
 import torch
 import torchvision
 from sklearn.preprocessing import OneHotEncoder
 from torch import nn
 from tqdm import tqdm
 
-from files import load_mnist_dataset, get_real_path
-from serial import JsonSerial
+from mlp_mnist.files import load_mnist_dataset, get_real_path
+from mlp_mnist.training_utils import Loss, Accuracy, save_accuracy_plot, save_loss_plot
 
 
 class MultiLayerPerceptron(nn.Module):
@@ -61,241 +58,27 @@ class MultiLayerPerceptronDropout(nn.Module):
         return self.layers(x)
 
 
-@dataclass
-class Loss(JsonSerial):
-    loss_vals_per_batch: List[float]
-    loss_vals_per_epoch: List[float]
-    batch_cnt: int = 0
-    previous_batch_cnt: int = 0
-    epoch_cnt: int = 0
-
-    @classmethod
-    def init(cls) -> "Loss":
-        return cls(loss_vals_per_batch=[], loss_vals_per_epoch=[], batch_cnt=0, previous_batch_cnt=0, epoch_cnt=0)
-
-    @classmethod
-    def from_json_file(cls, json_file: Union[str, Path]) -> "Loss":
-        # method to read in 'Loss' class from saved json file (help with picking up from some spot of training)
-        return super().read_json(json_file)
-
-    def __add__(self, other: Union[float, int]):
-        # add in additional loss values when a batch is done being processed
-        self.loss_vals_per_batch.append(other)
-        self.batch_cnt += 1
-        return self
-
-    def __iadd__(self, other: Union[float, int]) -> "Loss":
-        # helps make code more readable when adding an item via '+='
-        return self.__add__(other)
-
-    @property
-    def current_loss(self) -> float:
-        # get current total loss mean by averaging all loss values
-        return np.sum(self.loss_vals_per_batch) / self.batch_cnt
-
-    @property
-    def previous_loss(self) -> float:
-        # get previous loss value to help with updating the average epoch loss value
-        if len(self.loss_vals_per_batch) > 1:
-            return np.sum(self.loss_vals_per_batch[:-2]) / self.batch_cnt - 1
-        else:
-            return 0
-
-    def update_for_epoch(self):
-        # update loss value per epoch for whichever epoch we are on
-        self.epoch_cnt += 1
-        self.loss_vals_per_epoch.append(
-            sum(self.loss_vals_per_batch[self.previous_batch_cnt : self.batch_cnt])
-            / (self.batch_cnt - self.previous_batch_cnt)
-        )
-        self.previous_batch_cnt = self.batch_cnt
-
-
-@dataclass
-class Accuracy(JsonSerial):
-    acc_vals_per_batch: List[float]
-    acc_vals_per_epoch: List[float]
-    correct_hits: np.ndarray
-    incorrect_hits: np.ndarray
-    output_decisions: int
-    batch_cnt: int = 0
-    previous_batch_cnt: int = 0
-    epoch_cnt: int = 0
-
-    @classmethod
-    def from_output_decisions(cls, output_size: int) -> "Accuracy":
-        return cls(
-            acc_vals_per_batch=[],
-            acc_vals_per_epoch=[],
-            batch_cnt=0,
-            previous_batch_cnt=0,
-            epoch_cnt=0,
-            correct_hits=np.zeros((output_size,)),
-            incorrect_hits=np.zeros((output_size, output_size)),
-            output_decisions=output_size,
-        )
-
-    @classmethod
-    def from_json_file(cls, json_file: Union[str, Path]) -> "Accuracy":
-        # method to read in 'Accuracy' class from saved json file (help with picking up from some spot of training)
-        return super().read_json(json_file)
-
-    def compare_batch(self, targets: torch.Tensor, outputs: torch.Tensor):
-        # determine accuracy between a batch of targets and outputs to update accuracy
-        hit: int = 0
-        for target, output in zip(targets, outputs):
-            max_idx = int(torch.argmax(output))
-            if bool(
-                target[max_idx]
-            ):  # see if the one hot encoding scheme of our output neuron layer determined the highest probability to be the same as the true target label
-                hit += 1
-                self.correct_hits[max_idx] += 1
-            else:
-                self.incorrect_hits[int(torch.argmax(target)), max_idx] += 1
-        self.acc_vals_per_batch.append(hit / len(targets))
-        self.batch_cnt += 1
-
-    def update_for_epoch(self):
-        # update accuracy for epoch
-        self.epoch_cnt += 1
-        self.acc_vals_per_epoch.append(
-            sum(self.acc_vals_per_batch[self.previous_batch_cnt : self.batch_cnt])
-            / (self.batch_cnt - self.previous_batch_cnt)
-        )
-        self.previous_batch_cnt = self.batch_cnt
-
-    @property
-    def confusion_matrix(self) -> np.ndarray:
-        # get confusion matrix to better visualize incorrect hits vs correct hits
-        return self.incorrect_hits.copy() + np.diag(self.correct_hits)
-
-    def save_confusion_matrix(self, output_path: Union[str, Path], categories: str):
-        # save confusion matrix
-        output_path = get_real_path(output_path)
-        df = pd.DataFrame(self.confusion_matrix, index=[i for i in categories], columns=[i for i in categories])
-        plt.figure(figsize=(10, 7))
-        sns.heatmap(df, annot=True)
-        plt.savefig(output_path)
-        plt.close()
-
-
-def plot_accuracy_or_loss(
-    train_vals: List[float],
-    output_path: Union[str, Path],
-    test_vals: Optional[List[float]] = None,
-    title: Optional[str] = None,
-    ylabel: Optional[str] = None,
-    xlabel: Optional[str] = None,
-    plot_labels: Optional[Union[str, List[str]]] = None,
-):
-    if plot_labels is None:
-        plot_labels = ["train", "test"]
-    elif not isinstance(plot_labels, list):
-        plot_labels = [plot_labels] * 2
-
-    x_epochs = np.arange(1, len(train_vals) + 1)
-    plt.plot(x_epochs, train_vals, label=plot_labels[0])
-    if test_vals is not None:
-        x_epochs = np.arange(len(train_vals) - len(test_vals) + 1, len(train_vals) + 1)
-        plt.plot(x_epochs, test_vals, label=plot_labels[1])
-    if title is not None:
-        plt.title(title)
-    if ylabel is not None:
-        plt.ylabel(ylabel)
-    if xlabel is not None:
-        plt.xlabel(xlabel)
-    plt.legend()
-    plt.savefig(get_real_path(output_path))
-    plt.close()
-
-
-def save_accuracy_plot(
-    train_acc: List[float],
-    output_path: Union[str, Path],
-    test_acc: Optional[List[float]] = None,
-    plot_labels: Optional[Union[str, List[str]]] = None,
-):
-    plot_accuracy_or_loss(
-        train_vals=train_acc,
-        test_vals=test_acc,
-        output_path=output_path,
-        title="Accuracy",
-        ylabel="Accuracy",
-        xlabel="Epochs",
-        plot_labels=plot_labels,
-    )
-
-
-def save_loss_plot(
-    train_loss: List[float],
-    output_path: Union[str, Path],
-    test_loss: Optional[List[float]] = None,
-    plot_labels: Optional[Union[str, List[str]]] = None,
-):
-    plot_accuracy_or_loss(
-        train_vals=train_loss,
-        test_vals=test_loss,
-        output_path=output_path,
-        title="Loss",
-        ylabel="Loss",
-        xlabel="Epochs",
-        plot_labels=plot_labels,
-    )
-
-
-default_number_of_input_features_for_mnist_dataset: int = 28 * 28
-default_number_of_output_decisions_for_mnist_dataset: int = 10
-
-
-class MnistMLP:
+class BaseMnist:
     train_loss: Loss
     train_accuracy: Accuracy
     test_loss: Loss
     test_accuracy: Accuracy
 
-    def __init__(
-        self,
-        number_of_inputs_features: int = default_number_of_input_features_for_mnist_dataset,
-        number_of_output_decisions: int = default_number_of_output_decisions_for_mnist_dataset,
-        learning_rate: float = 1e-4,
-        num_epochs: int = 100,
-        early_stopping_th: Optional[float] = 1e-4,
-        epoch_to_save_model: Optional[int] = None,
-        use_dropout: bool = True,
-        verbose: bool = True,
-    ):
-        if number_of_inputs_features != default_number_of_input_features_for_mnist_dataset:
-            print(
-                "You are changing the default number of input features for training on the mnist dataset. Are you "
-                "sure you want to do that?"
-            )
-        if number_of_output_decisions != default_number_of_output_decisions_for_mnist_dataset:
-            print(
-                "You are changing the default number of output decisions for training on the mnist dataset. Are you "
-                "sure you want to do that?"
-            )
-        self.input_features = number_of_inputs_features
-        self.output_decisions = number_of_output_decisions
-        if use_dropout:  # use MLP with dropout layers
-            self.mlp = MultiLayerPerceptronDropout(number_of_inputs_features, number_of_output_decisions)
-        else:
-            self.mlp = MultiLayerPerceptron(number_of_inputs_features, number_of_output_decisions)
-        self.loss_function = (
-            nn.CrossEntropyLoss()
-        )  # loss function, which will be used during backpropagation using our optimizer
-        self.optimizer = torch.optim.Adam(
-            self.mlp.parameters(), lr=learning_rate
-        )  # adam optimizer to perform backpropagation of updating our weight vectors
-        self.num_epochs = num_epochs  # number of times to run our train and test loader
-        self.early_stopping_th = (
-            early_stopping_th
-        )  # threshold to stop training if our loss does not continue to decrease
-        self.epoch_to_save_model = epoch_to_save_model  # save model every time the epoch reaches this value
+    def __init__(self):
+        super(BaseMnist, self).__init__()
         self.enc = OneHotEncoder()  # encoding scheme for labels
         self.enc.fit([[0], [1], [2], [3], [4], [5], [6], [7], [8], [9]])
-        self.verbose = verbose  # turn on/off reporting train/test loss/accuracy during training and/or testing
 
-    def get_output_paths_(self, output_path: Path, epoch: int) -> Tuple[Union[str, Path], ...]:
+    @classmethod
+    def get_output_paths_(
+        cls,
+        output_path: Path,
+        epoch: int,
+        no_loss: bool = False,
+        no_accuracy: bool = False,
+        no_confusion: bool = False,
+        no_models: bool = False,
+    ) -> Tuple[Union[str, Path], ...]:
         # utility function to get output paths for all meaningful outputs when saving a model
         if Path(output_path).suffix in [""]:
             Path(output_path).mkdir(exist_ok=True, parents=True)
@@ -307,10 +90,14 @@ class MnistMLP:
 
         time_now = datetime.now()
         model_pt_name = time_now.strftime("%Y-%m-%d--%H-%M-%S")
-        (Path(temp_output_path) / "loss").mkdir(exist_ok=True, parents=True)
-        (Path(temp_output_path) / "accuracy").mkdir(exist_ok=True, parents=True)
-        (Path(temp_output_path) / "confusion").mkdir(exist_ok=True, parents=True)
-        (Path(temp_output_path) / "models").mkdir(exist_ok=True, parents=True)
+        if not no_loss:
+            (Path(temp_output_path) / "loss").mkdir(exist_ok=True, parents=True)
+        if not no_accuracy:
+            (Path(temp_output_path) / "accuracy").mkdir(exist_ok=True, parents=True)
+        if not no_confusion:
+            (Path(temp_output_path) / "confusion").mkdir(exist_ok=True, parents=True)
+        if not no_models:
+            (Path(temp_output_path) / "models").mkdir(exist_ok=True, parents=True)
         if os.name == "nt":
             temp_output_path = str(temp_output_path)
             train_loss_json_path = temp_output_path + f"\\loss\\loss-train-{model_pt_name}--{epoch}.json"
@@ -348,6 +135,88 @@ class MnistMLP:
             accuracy_plot_path,
             loss_plot_path,
         )
+
+    def preprocess_data(self, images, labels, batch_size: int, shuffle: bool = True) -> torch.utils.data.DataLoader:
+        # perform one hot encoding.
+        # E.g., if class labels are '0', '1', '2', '3', then each label will map to the following
+        # '0' -> [1, 0, 0, 0]
+        # '1' -> [0, 1, 0, 0]
+        # '2' -> [0, 0, 1, 0]
+        # '3' -> [0, 0, 0, 1]
+        labels = self.enc.transform(np.column_stack(labels).reshape(-1, 1)).toarray()
+        # find the mean and standard deviation of the images in order to properly normalize the data
+        mean_ = np.mean(images)
+        std_ = np.std(images)
+        # transform data to Tensor using FloatTensor
+        # reshape the data tensors so that each tensor is square using the dimensions of the first data (assuming all data is the same shape)
+        # if we have 10 inputs that each have a length of 100, then we will get a tensor with the dimensions = (10, 10, 10)
+        if np.array(images[0]).ndim == 1:
+            test_images_tensors = (
+                torch.FloatTensor(images)
+                .reshape(len(images), int(np.sqrt(len(images[0]))), int(np.sqrt(len(images[0]))))
+                .unsqueeze(0)
+            )
+        else:
+            test_images_tensors = (
+                torch.FloatTensor(images)
+                .reshape(len(images), np.array(images[0]).shape[0], np.array(images[0]).shape[1])
+                .unsqueeze(0)
+            )
+        # normalize data using mean and standard deviation
+        preprocessing_transform = torchvision.transforms.Normalize([mean_], [std_])
+        images_preprocessed = torch.squeeze(preprocessing_transform(test_images_tensors))
+        # load images and labels into dataloader for compatability with pytorch
+        data_loader = torch.utils.data.DataLoader(
+            [[img, label] for img, label in zip(images_preprocessed, labels)], shuffle=shuffle, batch_size=batch_size
+        )
+        return data_loader
+
+
+default_number_of_input_features_for_mnist_dataset: int = 28 * 28
+default_number_of_output_decisions_for_mnist_dataset: int = 10
+
+
+class MnistMLP(BaseMnist):
+    def __init__(
+        self,
+        number_of_inputs_features: int = default_number_of_input_features_for_mnist_dataset,
+        number_of_output_decisions: int = default_number_of_output_decisions_for_mnist_dataset,
+        learning_rate: float = 1e-4,
+        num_epochs: int = 100,
+        early_stopping_th: Optional[float] = 1e-4,
+        epoch_to_save_model: Optional[int] = None,
+        use_dropout: bool = True,
+        verbose: bool = True,
+    ):
+        super().__init__()
+        if number_of_inputs_features != default_number_of_input_features_for_mnist_dataset:
+            print(
+                "You are changing the default number of input features for training on the mnist dataset. Are you "
+                "sure you want to do that?"
+            )
+        if number_of_output_decisions != default_number_of_output_decisions_for_mnist_dataset:
+            print(
+                "You are changing the default number of output decisions for training on the mnist dataset. Are you "
+                "sure you want to do that?"
+            )
+        self.input_features = number_of_inputs_features
+        self.output_decisions = number_of_output_decisions
+        if use_dropout:  # use MLP with dropout layers
+            self.mlp = MultiLayerPerceptronDropout(number_of_inputs_features, number_of_output_decisions)
+        else:
+            self.mlp = MultiLayerPerceptron(number_of_inputs_features, number_of_output_decisions)
+        self.loss_function = (
+            nn.CrossEntropyLoss()
+        )  # loss function, which will be used during backpropagation using our optimizer
+        self.optimizer = torch.optim.Adam(
+            self.mlp.parameters(), lr=learning_rate
+        )  # adam optimizer to perform backpropagation of updating our weight vectors
+        self.num_epochs = num_epochs  # number of times to run our train and test loader
+        self.early_stopping_th = (
+            early_stopping_th
+        )  # threshold to stop training if our loss does not continue to decrease
+        self.epoch_to_save_model = epoch_to_save_model  # save model every time the epoch reaches this value
+        self.verbose = verbose  # turn on/off reporting train/test loss/accuracy during training and/or testing
 
     def train(
         self,
@@ -497,9 +366,6 @@ class MnistMLP:
         else:
             model = self.mlp
         model.eval()
-        # initialize appropriate classes to keep track of Loss & accuracy
-        loss = Loss.init()
-        self_loss = nn.CrossEntropyLoss()
         accuracy = Accuracy.from_output_decisions(self.output_decisions)
         epoch_tqdm = tqdm(total=self.num_epochs, desc="Epoch", position=0)
         for epoch in range(self.num_epochs):
@@ -507,13 +373,9 @@ class MnistMLP:
                 # test our hopefully trained model on our test data
                 inputs, targets = data
                 outputs = model(inputs)
-                loss_val = self_loss(outputs, targets)
-                loss_val.backward()
-                loss += loss_val.item()
                 accuracy.compare_batch(targets=targets, outputs=outputs)
             accuracy.update_for_epoch()
             if self.verbose:
-                epoch_tqdm.write(f"Loss = {loss.current_loss}")
                 epoch_tqdm.write(f"Accuracy = {accuracy.acc_vals_per_epoch[epoch]}")
             epoch_tqdm.update(1)
 
@@ -529,48 +391,10 @@ class MnistMLP:
             loss_plot_path,
         ) = self.get_output_paths_(output_path, epoch)
 
-        self.test_loss = loss
         self.test_accuracy = accuracy
-        self.test_loss.save_json(test_loss_json_path)
         self.test_accuracy.save_json(test_accuracy_json_path)
         self.test_accuracy.save_confusion_matrix(confusion_matrix_path, "0123456789")
         save_accuracy_plot(self.test_accuracy.acc_vals_per_epoch, accuracy_plot_path, plot_labels="test")
-        save_loss_plot(self.test_loss.loss_vals_per_epoch, loss_plot_path, plot_labels="test")
-
-    def preprocess_data(self, images, labels, batch_size: int) -> torch.utils.data.DataLoader:
-        # perform one hot encoding.
-        # E.g., if class labels are '0', '1', '2', '3', then each label will map to the following
-        # '0' -> [1, 0, 0, 0]
-        # '1' -> [0, 1, 0, 0]
-        # '2' -> [0, 0, 1, 0]
-        # '3' -> [0, 0, 0, 1]
-        labels = self.enc.transform(np.column_stack(labels).reshape(-1, 1)).toarray()
-        # find the mean and standard deviation of the images in order to properly normalize the data
-        mean_ = np.mean(images)
-        std_ = np.std(images)
-        # transform data to Tensor using FloatTensor
-        # reshape the data tensors so that each tensor is square using the dimensions of the first data (assuming all data is the same shape)
-        # if we have 10 inputs that each have a length of 100, then we will get a tensor with the dimensions = (10, 10, 10)
-        if np.array(images[0]).ndim == 1:
-            test_images_tensors = (
-                torch.FloatTensor(images)
-                .reshape(len(images), int(np.sqrt(len(images[0]))), int(np.sqrt(len(images[0]))))
-                .unsqueeze(0)
-            )
-        else:
-            test_images_tensors = (
-                torch.FloatTensor(images)
-                .reshape(len(images), np.array(images[0]).shape[0], np.array(images[0]).shape[1])
-                .unsqueeze(0)
-            )
-        # normalize data using mean and standard deviation
-        preprocessing_transform = torchvision.transforms.Normalize([mean_], [std_])
-        images_preprocessed = torch.squeeze(preprocessing_transform(test_images_tensors))
-        # load images and labels into dataloader for compatability with pytorch
-        data_loader = torch.utils.data.DataLoader(
-            [[img, label] for img, label in zip(images_preprocessed, labels)], shuffle=True, batch_size=batch_size
-        )
-        return data_loader
 
 
 def test_and_or_train_on_mnist_dataset(
