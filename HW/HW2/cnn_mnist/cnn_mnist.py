@@ -10,9 +10,9 @@ import torch.nn.functional as F
 from torch import nn
 from tqdm import tqdm
 
-from mlp_mnist.files import load_mnist_dataset, get_real_path
-from mlp_mnist.mlp import BaseMnist
-from mlp_mnist.training_utils import Loss, Accuracy, save_accuracy_plot, save_loss_plot
+from base_mnist import BaseMnist
+from files import load_mnist_dataset, get_real_path
+from training_utils import Loss, Accuracy, save_accuracy_plot, save_loss_plot
 
 TupleType = Union[Tuple[Union[int, float], Union[int, float]], List[Union[int, float]], torch.Size]
 
@@ -141,6 +141,8 @@ def deconvnet(
             if weight_idx != len(weights) - 1 and maxunpool is not None:
                 deconv_ = maxunpool[weight_idx](deconv_, maxpool_idx[weight_idx])
                 deconv_ = activation_layer(deconv_)
+            # if len(np.unique(np.ravel(deconv_.detach().numpy()))) < 100:
+            #     print(f"number of unique vals in deconv_ = '{len(np.unique(np.ravel(deconv_.detach().numpy())))}'")
             act_out_zeros = deconv_
         deconv_out[:, idx, :, :] = deconv_
 
@@ -288,6 +290,7 @@ class BaseCnnMnist(nn.Module):
     def reconstruction(
         self,
         output_path: Union[str, Path],
+        original_inputs: torch.Tensor,
         labels_per_batch_idx: List[int],
         batch_idx: Optional[List[int]] = None,
         one_unique_label: bool = True,
@@ -313,11 +316,20 @@ class BaseCnnMnist(nn.Module):
             maxpool_idx2 = self.intermediate_outputs.maxpool_idx2[batch_idx]
             maxpool1 = self.intermediate_outputs.maxpool1[batch_idx]
             maxpool_idx1 = self.intermediate_outputs.maxpool_idx1[batch_idx]
+            original_inputs = original_inputs[batch_idx]
         else:
             maxpool2 = self.intermediate_outputs.maxpool2
             maxpool_idx2 = self.intermediate_outputs.maxpool_idx2
             maxpool1 = self.intermediate_outputs.maxpool1
             maxpool_idx1 = self.intermediate_outputs.maxpool_idx1
+
+        for idx, (original_input, label) in enumerate(zip(original_inputs, labels_per_batch_idx)):
+            fig_path = output_path / f"{label}.png"
+            plt.imsave(get_real_path(fig_path), original_input.detach().numpy())
+            if upsample:
+                upsample_original_input = F.interpolate(original_input.unsqueeze(0).unsqueeze(0), size=upsample_size, mode="nearest").squeeze()
+                fig_path = output_path / f"{label}-upsampled.png"
+                plt.imsave(get_real_path(fig_path), upsample_original_input.detach().numpy())
 
         maxunpool1 = self.reconstruction_maxunpool(maxpool1, maxpool_idx1)
         activation1 = self.activation1(maxunpool1)
@@ -616,6 +628,7 @@ class CnnMnist(BaseMnist):
                         accurate_labels = [acc_idx[1] for acc_idx in accurate_idx]
                     model.reconstruction(
                         reconstruction_output_path,
+                        original_inputs=inputs,
                         labels_per_batch_idx=accurate_labels,
                         batch_idx=accurate_batch_idx,
                         one_unique_label=one_unique_label,
@@ -733,10 +746,10 @@ def cnn_mnist_run(
 
 
 def main():
-    mnist_data_sets_base_path = Path("../../HW1/DATA/MNIST")
-    model_output_base_path = Path("./model-1")
-    # model_path_to_test = Path("./model-1/models/model-2023-02-09--00-32-15--16.pt")
-    model_path_to_test = None
+    mnist_data_sets_base_path = Path("DATA/MNIST")
+    model_output_base_path = Path("./model-0")
+    model_path_to_test = Path("./model-1/models/model-2023-02-09--00-29-12--15.pt")
+    # model_path_to_test = None
     n_epochs = 100
     epochs_to_save_model = 5
     batch_size_train = 64
@@ -750,7 +763,7 @@ def main():
     one_unique_label_for_reconstruction: bool = True
     upsample_reconstruction_activations: bool = True
     upsample_reconstruction_size: Tuple[int, int] = (256, 256)
-    test_using_training_set: bool = True
+    test_using_training_set: bool = False
     verbose: bool = True
     cnn_mnist_run(
         mnist_data_sets_base_path=mnist_data_sets_base_path,
