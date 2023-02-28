@@ -78,6 +78,7 @@ class BaseMnist:
         no_accuracy: bool = False,
         no_confusion: bool = False,
         no_models: bool = False,
+        no_stats: bool = False,
     ) -> Tuple[Union[str, Path], ...]:
         # utility function to get output paths for all meaningful outputs when saving a model
         if Path(output_path).suffix in [""]:
@@ -98,6 +99,8 @@ class BaseMnist:
             (Path(temp_output_path) / "confusion").mkdir(exist_ok=True, parents=True)
         if not no_models:
             (Path(temp_output_path) / "models").mkdir(exist_ok=True, parents=True)
+        if not no_stats:
+            (Path(temp_output_path) / "stats").mkdir(exist_ok=True, parents=True)
         if os.name == "nt":
             temp_output_path = str(temp_output_path)
             train_loss_json_path = temp_output_path + f"\\loss\\loss-train-{model_pt_name}--{epoch}.json"
@@ -106,6 +109,8 @@ class BaseMnist:
             test_accuracy_json_path = temp_output_path + f"\\accuracy\\accuracy-test-{model_pt_name}--{epoch}.json"
             confusion_matrix_path = temp_output_path + f"\\confusion\\confusion-matrix-{model_pt_name}--{epoch}.png"
             accuracy_plot_path = temp_output_path + f"\\accuracy\\accuracy-{model_pt_name}--{epoch}.png"
+            roc_curve_plot_path = temp_output_path + f"\\stats\\roc-curve-{model_pt_name}--{epoch}.png"
+            cum_stats_csv_path = temp_output_path + f"\\stats\\cumulative-stats--{model_pt_name}--{epoch}.csv"
             loss_plot_path = temp_output_path + f"\\loss\\loss-{model_pt_name}--{epoch}.png"
             if Path(output_path).suffix in [".pt"]:
                 output_path = output_path
@@ -119,6 +124,8 @@ class BaseMnist:
             test_accuracy_json_path = temp_output_path / "accuracy" / f"accuracy-test-{model_pt_name}--{epoch}.json"
             confusion_matrix_path = temp_output_path / "confusion" / f"confusion-matrix-{model_pt_name}--{epoch}.png"
             accuracy_plot_path = temp_output_path / "accuracy" / f"accuracy-{model_pt_name}--{epoch}.png"
+            roc_curve_plot_path = temp_output_path / "stats" / f"roc-curve--{model_pt_name}--{epoch}.png"
+            cum_stats_csv_path = temp_output_path / "stats" / f"cumulative-stats--{model_pt_name}--{epoch}.csv"
             loss_plot_path = temp_output_path / "loss" / f"loss-{model_pt_name}--{epoch}.png"
             if Path(output_path).suffix in [".pt"]:
                 output_path = output_path
@@ -133,6 +140,8 @@ class BaseMnist:
             test_accuracy_json_path,
             confusion_matrix_path,
             accuracy_plot_path,
+            roc_curve_plot_path,
+            cum_stats_csv_path,
             loss_plot_path,
         )
 
@@ -306,6 +315,8 @@ class MnistMLP(BaseMnist):
                     test_accuracy_json_path,
                     confusion_matrix_path,
                     accuracy_plot_path,
+                    _,
+                    _,
                     loss_plot_path,
                 ) = self.get_output_paths_(output_path, epoch)
                 torch.save(self.mlp.state_dict(), epoch_output_path)
@@ -332,6 +343,8 @@ class MnistMLP(BaseMnist):
             test_accuracy_json_path,
             confusion_matrix_path,
             accuracy_plot_path,
+            roc_curve_plot_path,
+            cum_stats_csv_path,
             loss_plot_path,
         ) = self.get_output_paths_(output_path, epoch)
         print(f"Saving model to '{output_path}'")
@@ -342,6 +355,8 @@ class MnistMLP(BaseMnist):
         self.train_loss.save_json(train_loss_json_path)
         self.train_accuracy.save_json(train_accuracy_json_path)
         self.train_accuracy.save_confusion_matrix(confusion_matrix_path, "0123456789")
+        self.train_accuracy.roc_curve(get_real_path(roc_curve_plot_path))
+        self.train_accuracy.cum_stats_to_csv(get_real_path(cum_stats_csv_path))
         if test_loader is not None:
             self.test_loss = test_loss
             self.test_accuracy = test_accuracy
@@ -388,12 +403,16 @@ class MnistMLP(BaseMnist):
             test_accuracy_json_path,
             confusion_matrix_path,
             accuracy_plot_path,
+            roc_curve_plot_path,
+            cum_stats_csv_path,
             loss_plot_path,
         ) = self.get_output_paths_(output_path, epoch)
 
         self.test_accuracy = accuracy
         self.test_accuracy.save_json(test_accuracy_json_path)
         self.test_accuracy.save_confusion_matrix(confusion_matrix_path, "0123456789")
+        self.test_accuracy.roc_curve(get_real_path(roc_curve_plot_path))
+        self.test_accuracy.cum_stats_to_csv(get_real_path(cum_stats_csv_path))
         save_accuracy_plot(self.test_accuracy.acc_vals_per_epoch, accuracy_plot_path, plot_labels="test")
 
 
@@ -458,21 +477,22 @@ def test_and_or_train_on_mnist_dataset(
 def main():
     mnist_data_sets_base_path = Path("../DATA/MNIST")
     model_output_base_path = Path("./model-0")
-    n_epochs = 1000
+    model_test_path = model_output_base_path / "models" / "model-2023-01-31--04-28-16--430.pt"
+    n_epochs = 10
     epochs_to_save_model = 5
     batch_size_train = 64
     batch_size_test = 1000
     learning_rate = 1e-4
     early_stopping_th = 1e-4
     use_dropout: bool = False
-    train: bool = True
+    train: bool = False
     test: bool = True
     verbose: bool = True
 
     test_and_or_train_on_mnist_dataset(
         mnist_data_sets_base_path=mnist_data_sets_base_path,
         model_output_base_path=model_output_base_path,
-        model_test_path=None,
+        model_test_path=model_test_path,
         n_epochs=n_epochs,
         epochs_to_save_model=epochs_to_save_model,
         batch_size_train=batch_size_train,
