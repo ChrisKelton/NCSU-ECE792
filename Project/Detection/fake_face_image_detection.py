@@ -45,7 +45,7 @@ def main():
         shuffle=True,
         batch_size=config_cffn["batch_size"],
         num_workers=2,
-        drop_last=False,
+        drop_last=True,
         pin_memory=False,
     )
     cffn = CFFN(

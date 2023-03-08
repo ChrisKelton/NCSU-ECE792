@@ -1,8 +1,9 @@
 __all__ = ["Loss", "Accuracy", "save_accuracy_plot", "save_loss_plot"]
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Union, Optional, Tuple
+from typing import List, Union, Optional, Tuple, Callable
 
+from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -346,4 +347,56 @@ def save_loss_plot(
         ylabel="Loss",
         xlabel="Epochs",
         plot_labels=plot_labels,
+    )
+
+
+training_path_name: Callable = lambda file_name, model_name, epoch, ext: f"{file_name}-{model_name}--{epoch}{ext}"
+
+
+def training_plot_paths(
+    output_path: Path,
+    epoch: int,
+    loss: bool = True,
+    accuracy: bool = True,
+    confusion: bool = True,
+    roc_curve: bool = True,
+    cum_stats: bool = True,
+    models: bool = True,
+) -> Tuple[Path, ...]:
+    if not output_path.exists():
+        output_path.mkdir(exist_ok=True, parents=True)
+    time_now = datetime.now()
+    model_pt_name = time_now.strftime("%Y-%m-%d--%H-%M-%S")
+    model_output_path = None
+    if models:
+        Path(output_path / "models").mkdir(exist_ok=True, parents=True)
+        model_output_path = output_path / "models" / training_path_name("model", model_pt_name, epoch, ".pth")
+    loss_output_path = None
+    if loss:
+        Path(output_path / "loss").mkdir(exist_ok=True, parents=True)
+        loss_output_path = output_path / "loss" / training_path_name("loss", model_pt_name, epoch, ".png")
+    accuracy_output_path = None
+    if accuracy:
+        Path(output_path / "accuracy").mkdir(exist_ok=True, parents=True)
+        accuracy_output_path = output_path / "accuracy" / training_path_name("accuracy", model_pt_name, epoch, ".png")
+    roc_curve_output_path = None
+    if roc_curve:
+        Path(output_path / "stats").mkdir(exist_ok=True, parents=True)
+        roc_curve_output_path = output_path / "stats" / training_path_name("roc-curve", model_pt_name, epoch, ".png")
+    confusion_matrix_output_path = None
+    if confusion:
+        Path(output_path / "confusion").mkdir(exist_ok=True, parents=True)
+        confusion_matrix_output_path = output_path / "confusion" / training_path_name("confusion-matrix", model_pt_name, epoch, ".png")
+    cum_stats_output_path = None
+    if cum_stats:
+        Path(output_path / "stats").mkdir(exist_ok=True, parents=True)
+        cum_stats_output_path = output_path / "stats" / training_path_name("cumulative-stats", model_pt_name, epoch, ".csv")
+
+    return (
+        model_output_path,
+        confusion_matrix_output_path,
+        accuracy_output_path,
+        roc_curve_output_path,
+        cum_stats_output_path,
+        loss_output_path,
     )

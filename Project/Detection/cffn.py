@@ -1,5 +1,5 @@
 __all__ = ["CFFN"]
-from typing import Union, Tuple, List
+from typing import Union, Tuple, List, Callable
 
 import torch
 import torch.nn as nn
