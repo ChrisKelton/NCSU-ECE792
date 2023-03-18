@@ -1,7 +1,8 @@
 __all__ = ["Loss", "Accuracy", "save_accuracy_plot", "save_loss_plot"]
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import List, Union, Optional, Tuple
+from typing import List, Union, Optional, Tuple, Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -78,9 +79,10 @@ class Accuracy(JsonSerial):
     batch_cnt: int = 0
     previous_batch_cnt: int = 0
     epoch_cnt: int = 0
+    onehotencoding: bool = True
 
     @classmethod
-    def from_output_decisions(cls, output_size: int) -> "Accuracy":
+    def from_output_decisions(cls, output_size: int, onehotencoding: bool = True) -> "Accuracy":
         return cls(
             acc_vals_per_batch=[],
             acc_vals_per_epoch=[],
@@ -95,6 +97,7 @@ class Accuracy(JsonSerial):
             incorrect_hits=np.zeros((output_size, output_size)),
             incorrect_hits_per_epoch=[],
             output_decisions=output_size,
+            onehotencoding=onehotencoding,
         )
 
     @classmethod
@@ -102,20 +105,49 @@ class Accuracy(JsonSerial):
         # method to read in 'Accuracy' class from saved json file (help with picking up from some spot of training)
         return super().read_json(json_file)
 
-    def compare_batch(self, targets: torch.Tensor, outputs: torch.Tensor) -> List[Tuple[int, int]]:
+    def compare_batch(self, targets: torch.Tensor, outputs: torch.Tensor) -> Optional[List[Tuple[int, int]]]:
         # determine accuracy between a batch of targets and outputs to update accuracy
         hit: int = 0
-        indices = []
-        for batch_idx, (target, output) in enumerate(zip(targets, outputs)):
-            max_idx = int(torch.argmax(output))
-            if bool(
-                target[max_idx]
-            ):  # see if the one hot encoding scheme of our output neuron layer determined the highest probability to be the same as the true target label
-                hit += 1
-                self.correct_hits[max_idx] += 1
-                indices.append((batch_idx, max_idx))
-            else:
-                self.incorrect_hits[int(torch.argmax(target)), max_idx] += 1
+        indices = None
+        if self.onehotencoding:
+            indices = []
+            for batch_idx, (target, output) in enumerate(zip(targets, outputs)):
+                max_idx = int(torch.argmax(output))
+                if bool(
+                    target[max_idx]
+                ):  # see if the one hot encoding scheme of our output neuron layer determined the highest probability to be the same as the true target label
+                    hit += 1
+                    self.correct_hits[max_idx] += 1
+                    indices.append((batch_idx, max_idx))
+                else:
+                    self.incorrect_hits[int(torch.argmax(target)), max_idx] += 1
+        else:
+            # assuming output is some value between 0 & 1 and that the targets are either 0 or 1
+            outputs = torch.round(outputs)
+
+            zero_targets_idx = torch.where(targets == 0)
+            zero_equality = torch.eq(outputs[zero_targets_idx], targets[zero_targets_idx])
+            try:
+                self.correct_hits[0] += sum(zero_equality).item()
+            except AttributeError:
+                self.correct_hits[0] += sum(zero_equality)
+            hit = sum(zero_equality)
+            try:
+                self.incorrect_hits[0] += sum(~zero_equality).item()
+            except AttributeError:
+                self.incorrect_hits[0] += sum(~zero_equality)
+
+            ones_targets_idx = torch.where(targets == 1)
+            ones_equality = torch.eq(outputs[ones_targets_idx], targets[ones_targets_idx])
+            try:
+                self.correct_hits[1] += sum(ones_equality).item()
+            except AttributeError:
+                self.correct_hits[1] += sum(ones_equality)
+            hit += sum(ones_equality)
+            try:
+                self.incorrect_hits[1] += sum(~ones_equality).item()
+            except AttributeError:
+                self.incorrect_hits[1] += sum(~ones_equality)
         self.acc_vals_per_batch.append(hit / len(targets))
         self.batch_cnt += 1
 
@@ -143,7 +175,7 @@ class Accuracy(JsonSerial):
         # get confusion matrix to better visualize incorrect hits vs correct hits
         return self.incorrect_hits.copy() + np.diag(self.correct_hits)
 
-    def save_confusion_matrix(self, output_path: Union[str, Path], categories: str):
+    def save_confusion_matrix(self, output_path: Union[str, Path], categories: Union[str, List[str]]):
         # save confusion matrix
         output_path = get_real_path(output_path)
         df = pd.DataFrame(self.confusion_matrix, index=[i for i in categories], columns=[i for i in categories])
@@ -151,6 +183,10 @@ class Accuracy(JsonSerial):
         sns.heatmap(df, annot=True)
         plt.savefig(output_path)
         plt.close()
+
+    @property
+    def current_accuracy(self) -> float:
+        return sum(self.acc_vals_per_batch) / self.batch_cnt
 
     def roc_curve(self, output_path: Union[str, Path]):
         tp = []
@@ -285,10 +321,8 @@ def plot_accuracy_or_loss(
 ):
     if plot_labels is None:
         plot_labels = ["train"]
-        if validation_vals is not None:
-            plot_labels.append("validation")
-        if test_vals is not None:
-            plot_labels.append("test")
+        plot_labels.append("validation")
+        plot_labels.append("test")
     elif not isinstance(plot_labels, list):
         plot_labels = [plot_labels] * 3
 
@@ -346,4 +380,56 @@ def save_loss_plot(
         ylabel="Loss",
         xlabel="Epochs",
         plot_labels=plot_labels,
+    )
+
+
+training_path_name: Callable = lambda file_name, model_name, epoch, ext: f"{file_name}-{model_name}--{epoch}{ext}"
+
+
+def training_plot_paths(
+    output_path: Path,
+    epoch: int,
+    loss: bool = True,
+    accuracy: bool = True,
+    confusion: bool = True,
+    roc_curve: bool = True,
+    cum_stats: bool = True,
+    models: bool = True,
+) -> Tuple[Path, ...]:
+    if not output_path.exists():
+        output_path.mkdir(exist_ok=True, parents=True)
+    time_now = datetime.now()
+    model_pt_name = time_now.strftime("%Y-%m-%d--%H-%M-%S")
+    model_output_path = None
+    if models:
+        Path(output_path / "models").mkdir(exist_ok=True, parents=True)
+        model_output_path = output_path / "models" / training_path_name("model", model_pt_name, epoch, ".pth")
+    loss_output_path = None
+    if loss:
+        Path(output_path / "loss").mkdir(exist_ok=True, parents=True)
+        loss_output_path = output_path / "loss" / training_path_name("loss", model_pt_name, epoch, ".png")
+    accuracy_output_path = None
+    if accuracy:
+        Path(output_path / "accuracy").mkdir(exist_ok=True, parents=True)
+        accuracy_output_path = output_path / "accuracy" / training_path_name("accuracy", model_pt_name, epoch, ".png")
+    roc_curve_output_path = None
+    if roc_curve:
+        Path(output_path / "stats").mkdir(exist_ok=True, parents=True)
+        roc_curve_output_path = output_path / "stats" / training_path_name("roc-curve", model_pt_name, epoch, ".png")
+    confusion_matrix_output_path = None
+    if confusion:
+        Path(output_path / "confusion").mkdir(exist_ok=True, parents=True)
+        confusion_matrix_output_path = output_path / "confusion" / training_path_name("confusion-matrix", model_pt_name, epoch, ".png")
+    cum_stats_output_path = None
+    if cum_stats:
+        Path(output_path / "stats").mkdir(exist_ok=True, parents=True)
+        cum_stats_output_path = output_path / "stats" / training_path_name("cumulative-stats", model_pt_name, epoch, ".csv")
+
+    return (
+        model_output_path,
+        confusion_matrix_output_path,
+        accuracy_output_path,
+        roc_curve_output_path,
+        cum_stats_output_path,
+        loss_output_path,
     )
