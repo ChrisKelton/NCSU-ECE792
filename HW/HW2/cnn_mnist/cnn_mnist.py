@@ -10,9 +10,9 @@ import torch.nn.functional as F
 from torch import nn
 from tqdm import tqdm
 
-from base_mnist import BaseMnist
-from files import load_mnist_dataset, get_real_path
-from training_utils import Loss, Accuracy, save_accuracy_plot, save_loss_plot
+from HW.HW1.mlp_mnist.mlp import BaseMnist
+from HW.HW1.mlp_mnist.files import load_mnist_dataset, get_real_path
+from HW.HW1.mlp_mnist.training_utils import Loss, Accuracy, save_accuracy_plot, save_loss_plot
 
 TupleType = Union[Tuple[Union[int, float], Union[int, float]], List[Union[int, float]], torch.Size]
 
@@ -746,7 +746,7 @@ def cnn_mnist_run(
 
 
 def main():
-    mnist_data_sets_base_path = Path("DATA/MNIST")
+    mnist_data_sets_base_path = Path("../../HW1/DATA/MNIST")
     model_output_base_path = Path("./model-0")
     model_path_to_test = Path("./model-1/models/model-2023-02-09--00-29-12--15.pt")
     # model_path_to_test = None
@@ -755,7 +755,7 @@ def main():
     batch_size_train = 64
     batch_size_test = 1000
     learning_rate = 0.01
-    train: bool = False
+    train: bool = True
     test: bool = False
     reconstruct: bool = True
     reconstruction_output_path: Path = model_output_base_path / "reconstruction"
