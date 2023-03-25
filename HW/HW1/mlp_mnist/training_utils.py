@@ -83,6 +83,10 @@ class Accuracy(JsonSerial):
 
     @classmethod
     def from_output_decisions(cls, output_size: int, onehotencoding: bool = True) -> "Accuracy":
+        if onehotencoding:
+            inc_hits_shape = (output_size, output_size)
+        else:
+            inc_hits_shape = (output_size, )
         return cls(
             acc_vals_per_batch=[],
             acc_vals_per_epoch=[],
@@ -94,7 +98,7 @@ class Accuracy(JsonSerial):
             epoch_cnt=0,
             correct_hits=np.zeros((output_size,)),
             correct_hits_per_epoch=[],
-            incorrect_hits=np.zeros((output_size, output_size)),
+            incorrect_hits=np.zeros(inc_hits_shape),
             incorrect_hits_per_epoch=[],
             output_decisions=output_size,
             onehotencoding=onehotencoding,
@@ -123,7 +127,7 @@ class Accuracy(JsonSerial):
                     self.incorrect_hits[int(torch.argmax(target)), max_idx] += 1
         else:
             # assuming output is some value between 0 & 1 and that the targets are either 0 or 1
-            outputs = torch.round(outputs)
+            outputs = torch.argmax(outputs, dim=1)
 
             zero_targets_idx = torch.where(targets == 0)
             zero_equality = torch.eq(outputs[zero_targets_idx], targets[zero_targets_idx])
@@ -266,7 +270,7 @@ class Accuracy(JsonSerial):
     def false_positive(self, epoch: int) -> int:
         if len(self.correct_hits) != 2:
             raise RuntimeError(f"False Positive only defined for Binary Classification")
-        return sum(self.incorrect_hits_per_epoch[epoch][1])
+        return self.incorrect_hits_per_epoch[epoch][0]
 
     @property
     def cum_false_positive(self) -> int:
@@ -278,7 +282,7 @@ class Accuracy(JsonSerial):
     def false_negative(self, epoch: int) -> int:
         if len(self.correct_hits) != 2:
             raise RuntimeError(f"False Negative only defined for Binary Classification")
-        return sum(self.incorrect_hits_per_epoch[epoch][0])
+        return self.incorrect_hits_per_epoch[epoch][1]
 
     @property
     def cum_false_negative(self) -> int:
