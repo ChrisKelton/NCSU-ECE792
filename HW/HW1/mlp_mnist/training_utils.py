@@ -318,6 +318,7 @@ def plot_accuracy_or_loss(
     ylabel: Optional[str] = None,
     xlabel: Optional[str] = None,
     plot_labels: Optional[Union[str, List[str]]] = None,
+    alpha: float = 1,
 ):
     if plot_labels is None:
         plot_labels = ["train"]
@@ -327,13 +328,13 @@ def plot_accuracy_or_loss(
         plot_labels = [plot_labels] * 3
 
     x_epochs = np.arange(1, len(train_vals) + 1)
-    plt.plot(x_epochs, train_vals, label=plot_labels[0])
+    plt.plot(x_epochs, train_vals, label=plot_labels[0], alpha=alpha)
     if validation_vals is not None:
         x_epochs = np.arange(len(train_vals) - len(validation_vals) + 1, len(train_vals) + 1)
-        plt.plot(x_epochs, validation_vals, label=plot_labels[1])
+        plt.plot(x_epochs, validation_vals, label=plot_labels[1], alpha=alpha)
     if test_vals is not None:
         x_epochs = np.arange(len(train_vals) - len(test_vals) + 1, len(train_vals) + 1)
-        plt.plot(x_epochs, test_vals, label=plot_labels[2])
+        plt.plot(x_epochs, test_vals, label=plot_labels[2], alpha=alpha)
     if title is not None:
         plt.title(title)
     if ylabel is not None:
@@ -370,6 +371,7 @@ def save_loss_plot(
     test_loss: Optional[List[float]] = None,
     val_loss: Optional[List[float]] = None,
     plot_labels: Optional[Union[str, List[str]]] = None,
+    alpha: float = 1,
 ):
     plot_accuracy_or_loss(
         train_vals=train_loss,
@@ -380,6 +382,7 @@ def save_loss_plot(
         ylabel="Loss",
         xlabel="Epochs",
         plot_labels=plot_labels,
+        alpha=alpha,
     )
 
 
