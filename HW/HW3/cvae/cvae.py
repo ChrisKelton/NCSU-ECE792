@@ -10,26 +10,8 @@ import torchvision.transforms as transforms
 from PIL import Image
 
 from Detection.celebrity_data_loader import CelebrityData
+from dataset import CelebrityDataCVAE
 from mlp_mnist.training_utils import Loss, training_plot_paths, save_loss_plot
-
-
-class CelebrityDataCVAE(CelebrityData):
-    def __init__(self, base_path: Path, attr_file: Path, img_transform=None, seed=None, use_tmpdir: bool = True):
-        super().__init__(base_path, img_transform, seed, use_tmpdir)
-        self.attrs = pd.read_csv(str(attr_file), index_col=0)
-
-    def __getitem__(self, index):
-        if self.use_tmpdir:
-            img_path = self.temp_real_dirname / self.real_images[index]
-        else:
-            img_path = self.real_images[index]
-        img = Image.open(img_path).convert("RGB")
-        if self.transform is not None:
-            img = self.transform(img)
-
-        attr = torch.Tensor(self.attrs.loc[int(img_path.with_suffix("").name)])
-
-        return img, attr
 
 
 class Encoder(nn.Module):
@@ -136,14 +118,16 @@ class CVAE(nn.Module):
     decoder_out = None
     conv_out = None
     activation_out = None
+    resized_out = None
 
     def __init__(
-        self,
-        latent_dim: int = 128,
-        n_attrs: int = 40,
-        lr: float = 1e-3,
-        img_size: int = 64,
-        device: Optional[torch.device] = None,
+      self,
+      latent_dim: int = 128,
+      n_attrs: int = 40,
+      lr: float = 1e-3,
+      img_size: int = 64,
+      out_match_img_size: bool = True,
+      device: Optional[torch.device] = None,
     ):
         super().__init__()
         if device is None:
@@ -151,17 +135,17 @@ class CVAE(nn.Module):
         else:
             self.device = device
         self.img_size = img_size
+        self.out_match_img_size = out_match_img_size
         self.latent_dim = latent_dim
         self.n_attrs = n_attrs
 
         self.attr_linear = nn.Linear(self.n_attrs, self.img_size * self.img_size)
 
-        self.encoder = Encoder(latent_dim=latent_dim)
+        self.encoder = Encoder(latent_dim=latent_dim, device=device).to(device)
         self.latent_linear = nn.Linear(self.latent_dim + self.n_attrs, 512 * 2 * 2)
 
-        self.decoder = Decoder()
-        # self.conv_final = nn.Conv2d(32, 3, kernel_size=(3, 3), padding=1)
-        self.conv_final = nn.Conv2d(16, 3, kernel_size=(3, 3), padding=1)
+        self.decoder = Decoder().to(device)
+        self.conv_final = nn.Conv2d(32, 3, kernel_size=(3, 3), padding=1)
         self.activation_tanh = nn.Tanh()
 
         self.loss = nn.MSELoss()
@@ -180,7 +164,12 @@ class CVAE(nn.Module):
         self.conv_out = self.conv_final(self.decoder_out)
         self.activation_out = self.activation_tanh(self.conv_out)
 
-        return self.activation_out
+        if self.out_match_img_size:
+            self.resized_out = F.interpolate(self.activation_out, size=(self.img_size, self.img_size), mode="bilinear")
+        else:
+            self.resized_out = self.activation_out
+
+        return self.resized_out
 
     def attr_transform(self, attr):
         attr = self.attr_linear(attr)
@@ -210,9 +199,8 @@ def run(
     chkp_freq: int = 1,
     img_size: int = 64,
 ):
-    # celebrity_data = None
-    # e = None
-    # try:
+    validation_set = True
+    test_set = True
     img_transforms = transforms.Compose(
         [
             transforms.Resize(int(64 * 1.1)),
@@ -224,7 +212,8 @@ def run(
         ]
     )
     celebrity_data = CelebrityDataCVAE(celebrity_data_zip_file, attr_file, img_transforms, seed, use_tmpdir=False)
-    if pin_memory:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if pin_memory or torch.cuda.is_available():
         num_workers = 2
     else:
         num_workers = 0
@@ -239,22 +228,62 @@ def run(
 
     cvae = CVAE(latent_dim=latent_dim, lr=lr, img_size=img_size)
 
-    cvae_loss = Loss.init()
+    cvae_train_loss = Loss.init()
+    cvae_val_loss = Loss.init()
+    cvae_test_loss = Loss.init()
     epoch_tqdm = tqdm(total=epochs, position=0)
     print("Starting Training Loop...")
     for epoch in range(epochs):
+        celebrity_data.update_dataset_type()
         for batch_idx, (img, attr) in enumerate(dataloader):
             cvae.optimizer.zero_grad()
+            img = img.to(device)
+            attr = attr.to(device)
             out = cvae(img, attr)
             loss = cvae.loss_back_grad(out, img)
-            cvae_loss += loss.item()
+            cvae_train_loss += loss.item()
 
             if batch_idx % 50 == 0:
-                print("[%d/%d][%d/%d]\tLoss: %.4f" % (epoch, epochs, batch_idx, len(dataloader), cvae_loss.current_loss))
+                print("[%d/%d][%d/%d]\tTrain Loss: %.8f" % (
+                epoch, epochs, batch_idx, len(dataloader), cvae_train_loss.current_loss))
 
-        cvae_loss.update_for_epoch()
+        if validation_set:
+            celebrity_data.update_dataset_type(val_set=True)
+            cvae.eval()
+            for batch_idx, (img, attr) in enumerate(dataloader):
+                img = img.to(device)
+                attr = attr.to(device)
+                out = cvae(img, attr)
+                loss = cvae.loss_back_grad(out, img, back_grad=False)
+                cvae_val_loss += loss.item()
+
+                if batch_idx % 50 == 0:
+                    print("Epoch: '%d' [%d/%d]\tValidation Loss: %.8f" % (
+                    epoch, batch_idx, len(dataloader), cvae_val_loss.current_loss))
+
+            cvae.train()
+
+        if test_set:
+            celebrity_data.update_dataset_type(test_set=True)
+            cvae.eval()
+            for batch_idx, (img, attr) in enumerate(dataloader):
+                img = img.to(device)
+                attr = attr.to(device)
+                out = cvae(img, attr)
+                loss = cvae.loss_back_grad(out, img, back_grad=False)
+                cvae_test_loss += loss.item()
+
+                if batch_idx % 50 == 0:
+                    print("Epoch: '%d' [%d/%d]\tTest Loss: %.8f" % (
+                    epoch, batch_idx, len(dataloader), cvae_val_loss.current_loss))
+
+            cvae.train()
+
+        cvae_train_loss.update_for_epoch()
+        cvae_val_loss.update_for_epoch()
+        cvae_test_loss.update_for_epoch()
         epoch_tqdm.update(1)
-        if (epoch + 1) % chkp_freq == 0:
+        if ((epoch + 1) % chkp_freq == 0) or (epoch + 1 == epochs):
             (
                 model_output_path,
                 confusion_matrix_path,
@@ -262,44 +291,19 @@ def run(
                 roc_curve_plot_path,
                 cum_stats_csv_path,
                 loss_plot_path,
-            ) = training_plot_paths(base_out_path, epoch+1)
+            ) = training_plot_paths(base_out_path, epoch + 1, accuracy=False, confusion=False, roc_curve=False,
+                                    cum_stats=False)
             torch.save(
                 {
                     "CVAE_state_dict": cvae.state_dict(),
                     "CVAE_optimizer": cvae.optimizer.state_dict()
-                 },
+                },
                 str(model_output_path),
             )
-            save_loss_plot(cvae_loss.loss_vals_per_epoch, loss_plot_path)
-
-    (
-        model_output_path,
-        confusion_matrix_path,
-        accuracy_plot_path,
-        roc_curve_plot_path,
-        cum_stats_csv_path,
-        loss_plot_path,
-    ) = training_plot_paths(base_out_path, epochs)
-    torch.save(
-        {
-            "CVAE_state_dict": cvae.state_dict(),
-            "CVAE_optimizer": cvae.optimizer.state_dict()
-        },
-        str(model_output_path),
-    )
-    save_loss_plot(cvae_loss.loss_vals_per_epoch, loss_plot_path)
-    a = 0
-    # except Exception as e:
-    #     pass
-    # finally:
-    #     if celebrity_data is not None:
-    #         celebrity_data.cleanup()
-    # if e is not None:
-    #     raise RuntimeError(f"Failed, got exception: {e}")
+            save_loss_plot(cvae_train_loss.loss_vals_per_epoch, loss_plot_path, cvae_test_loss.loss_vals_per_epoch, cvae_val_loss.loss_vals_per_epoch)
 
 
 def main():
-    # celebrity_data_zip_file = Path("C:/Users/Chris/Documents/NCSU-Graduate/Courses/ECE792/Project/datasets/Dataset/RealFaces/img_align_celeba.zip")
     celebrity_data_zip_file = Path("C:/Users/Chris/Documents/NCSU-Graduate/Courses/ECE792/Project/datasets/realimages/celeba/img_align_celeba")
     attr_file = Path("C:/Users/Chris/Documents/NCSU-Graduate/Courses/ECE792/Project/datasets/realimages/celeba/img_align_celeba_attr.csv")
     base_out_path = Path("C:/Users/Chris/Documents/NCSU-Graduate/Courses/ECE792/HW/HW3/cvae-models")
