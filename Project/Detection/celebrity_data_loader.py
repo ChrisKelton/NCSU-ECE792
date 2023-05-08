@@ -1,9 +1,10 @@
-__all__ = ["CelebrityData", "CelebrityDataCFFN"]
+__all__ = ["CelebrityDataFake", "CelebrityDataCFFN"]
 import itertools
 import math
 import os
 from pathlib import Path
-from typing import Dict, List, Union
+from tempfile import TemporaryDirectory
+from typing import Dict, List, Union, Optional
 from typing import Tuple
 from zipfile import ZipFile
 
@@ -13,6 +14,49 @@ from PIL import Image
 
 
 class CelebrityData(torch.utils.data.Dataset):
+    def __init__(self, zip_file: Path, transform=None, seed: Optional[int] = None, use_tmpdir: bool = True):
+        super().__init__()
+        self.rng = np.random.default_rng(seed)
+        self.transform = transform
+        self.use_tmpdir = use_tmpdir
+        zipObj = None
+        if self.use_tmpdir:
+            self.tmpdirname = TemporaryDirectory()
+            self.temp_real_dirname = Path(self.tmpdirname.name) / "real"
+            with ZipFile(str(zip_file), 'r') as zipObj:
+                # Extract all the contents of zip file to temp_dir
+                zipObj.extractall(self.temp_real_dirname)
+        elif zip_file.suffix in [".zip"]:
+            with ZipFile(str(zip_file), 'r') as zipObj:
+                zipObj.extractall()
+        else:
+            self.real_images = sorted(zip_file.glob("*.jpg"))
+
+        if zipObj is not None:
+            self.real_images = zipObj.namelist()[1:]
+
+    def __getitem__(self, index):
+        if self.use_tmpdir:
+            img_path = Path(self.temp_real_dirname) / self.real_images[index]
+        else:
+            img_path = self.real_images[index]
+
+        img = Image.open(img_path).convert("RGB")
+        if self.transform is not None:
+            img = self.transform(img)
+
+        return img
+
+    def __len__(self):
+        return len(self.real_images)
+
+    def cleanup(self):
+        if self.use_tmpdir:
+            print("Cleaning up zip files")
+            self.tmpdirname.cleanup()
+
+
+class CelebrityDataFake(CelebrityData):
 
     def __init__(self, base_path: Path, transform=None, seed=None):
         '''
@@ -21,8 +65,13 @@ class CelebrityData(torch.utils.data.Dataset):
         RealFaces -> .zip
         FakeFaces -> GANType -> .zip (e.g., FakeFaces -> PGGAN -> .zip)
         '''
-        super().__init__()
-        self.rng = np.random.default_rng(seed)
+        self.real_images_path = Path(base_path) / "RealFaces"
+        real_images_zip_files = sorted(self.real_images_path.glob("*.zip"))
+        if len(real_images_zip_files) != 1:
+            raise RuntimeError(
+                f"Got more than or less than 1 zip file in '{self.real_images_path}'. Got '{len(real_images_zip_files)}'")
+        self.real_images_zip_file = real_images_zip_files[0]
+        super().__init__(self.real_images_zip_file, transform, seed)
 
         self.fake_images_path = Path(base_path) / "FakeFaces"
         self.fake_image_gan_names = os.listdir(str(self.fake_images_path))
@@ -30,37 +79,25 @@ class CelebrityData(torch.utils.data.Dataset):
         for fake_image_gan_name in self.fake_image_gan_names:
             fake_image_gan_path = self.fake_images_path / fake_image_gan_name
             zip_file = sorted(fake_image_gan_path.glob("*.zip"))
+            temp_gan_dirname = Path(self.tmpdirname.name) / fake_image_gan_name
             if len(zip_file) == 1:
                 zip_file = zip_file[0]
                 with ZipFile(str(zip_file), 'r') as zipObj:
-                    zipObj.extractall()
+                    zipObj.extractall(temp_gan_dirname)
                 self.fake_images.update({fake_image_gan_name: zipObj.namelist()})
             else:
                 fake_image_paths = sorted(fake_image_gan_path.glob("*.jpg"))
                 self.fake_images.update({fake_image_gan_name: fake_image_paths})
 
         self.n_fake_gans = len(list(self.fake_images.keys()))
-
-        self.real_images_path = Path(base_path) / "RealFaces"
-        real_images_zip_files = sorted(self.real_images_path.glob("*.zip"))
-        if len(real_images_zip_files) != 1:
-            raise RuntimeError(
-                f"Got more than or less than 1 zip file in '{self.real_images_path}'. Got '{len(real_images_zip_files)}'")
-        self.real_images_zip_file = real_images_zip_files[0]
-        # Create a ZipFile Object and load sample.zip in it
-        with ZipFile(str(self.real_images_zip_file), 'r') as zipObj:
-            # Extract all the contents of zip file in current directory
-            zipObj.extractall()
-        self.real_images = zipObj.namelist()[1:self.len_of_fake_images + 1]
-
-        self.transform = transform
-
         # according to Deep Fake Image Detection Based on Pairwise Learning, we need to make combinations for all
         # real images with all fake images
         fake_img_list = []
         for fake_imgs in self.fake_images.values():
             fake_img_list.extend(fake_imgs)
         self.fake_img_list = fake_img_list
+
+        self.real_images = self.real_images[:self.len_of_fake_images + 1]
 
     def fake_image_rand_selection(self, index):
         rand_selection = self.rng.uniform(low=-0.499, high=len(self.fake_images) - 0.501)
@@ -93,7 +130,7 @@ def get_n_objs_for_a_number_of_combinations_with_2_at_a_time(combs: int) -> int:
     return int((1 + math.sqrt(1 + (4*combs * 2))) / 2)
 
 
-class CelebrityDataCFFN(CelebrityData):
+class CelebrityDataCFFN(CelebrityDataFake):
 
     def __init__(self, base_path: Path, transform=None, seed=None, n_combinations: int = 2e6):
         super().__init__(base_path, transform, seed)
